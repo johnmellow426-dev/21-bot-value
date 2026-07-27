@@ -11,20 +11,44 @@ from telegram.ext import Application, MessageHandler, filters, ContextTypes, Com
 # === КОНФИГ ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "7595431774:AAGqVaashXulX08PEpgZHsn7LysPrV6rul0")
 SOURCE_CHAT_ID = -1003469691743
-PRED_CHANNEL = -1003113077361
+
+# Каналы для прогнозов
+PRED_CHANNEL = -1003113077361       # Канал для Рангов карт (+3 игры)
+SUIT_PRED_CHANNEL = -1003113077361  # ⚠️ УКАЖИТЕ ID КАНАЛА ДЛЯ МАСТЕЙ (+7 игр)
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 HISTORY_FILE = os.path.join(DATA_DIR, "simple_history.json")
+
+# Файлы для рангов
 RANK_PRED_FILE = os.path.join(DATA_DIR, "active_pred_rank.json")
 STATS_RANK_FILE = os.path.join(DATA_DIR, "stats_rank.json")
 
-TOTAL_GAMES = 1440
-PREDICT_OFFSET = 3  # Прогнозируем на +3 игры вперед (например, 1215 -> 1218)
-CHECK_RANGE = 3     # Основная игра + 2 догона (всего 3 попытки: 0, +1, +2)
+# Файлы для мастей
+SUIT_PRED_FILE = os.path.join(DATA_DIR, "active_pred_suit.json")
+SUIT_QUEUE_FILE = os.path.join(DATA_DIR, "queue_pred_suit.json")
+STATS_SUIT_FILE = os.path.join(DATA_DIR, "stats_suit.json")
 
-LOG_FILE = os.path.join(DATA_DIR, "rank_predictor.log")
+TOTAL_GAMES = 1440
+CHECK_RANGE = 3  # Основная игра + 2 догона
+
+# Карта зеркализации мастей
+SUIT_MIRROR = {
+    '♣': '♦',
+    '♦': '♣',
+    '♠': '♥',
+    '♥': '♠'
+}
+
+SUIT_NAMES = {
+    '♣': '♣️ Трефы',
+    '♦': '♦️ Буби',
+    '♠': '♠️ Пики',
+    '♥': '♥️ Черви'
+}
+
+LOG_FILE = os.path.join(DATA_DIR, "baccarat_predictor.log")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,18 +75,17 @@ def save_json(file: str, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def extract_ranks(cards_str: str) -> List[str]:
-    """Извлекает только ранги карт (например: ['3', '7', 'J'])"""
+def parse_cards_and_suits(cards_str: str) -> tuple[List[str], List[str]]:
+    """Извлекает отдельно ранги и масти карт"""
     cleaned = re.sub(r'[🔰✅🟩]', '', cards_str)
     ranks = re.findall(r'([A-Z\d]+)\s*[♣♦♥♠]', cleaned)
-    return ranks
+    suits = re.findall(r'[♣♦♥♠]', cleaned)
+    return ranks, suits
 
 
 def parse_game(text: str) -> Optional[Dict]:
-    # Убираем префикс экспорта Telegram
     text = re.sub(r'^\[\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}\]\s*[^:]+:\s*', '', text)
 
-    # Паттерн разбирает галочки, очки и списки карт
     pattern = r'#N(\d+)\.\s*(?:✅|🔰)?\s*(\d+)\s*\(([^)]+)\)\s*(?:✅|🔰)?\s*(\d+)\s*\(([^)]+)\)'
     match = re.search(pattern, text)
 
@@ -71,27 +94,19 @@ def parse_game(text: str) -> Optional[Dict]:
         player_str = match.group(3)
         banker_str = match.group(5)
 
-        player_ranks = extract_ranks(player_str)
-        banker_ranks = extract_ranks(banker_str)
+        player_ranks, player_suits = parse_cards_and_suits(player_str)
+        banker_ranks, banker_suits = parse_cards_and_suits(banker_str)
 
         if player_ranks and banker_ranks:
             return {
                 "raw_id": raw_id,
                 "player_ranks": player_ranks,
+                "player_suits": player_suits,
                 "banker_ranks": banker_ranks,
+                "banker_suits": banker_suits,
                 "all_ranks": player_ranks + banker_ranks,
-                "hour": datetime.now().hour,
-                "timestamp": datetime.now().isoformat(),
-                "text": text
+                "timestamp": datetime.now().isoformat()
             }
-        else:
-            logger.warning(f"Не удалось извлечь карты для игры #{raw_id}: player='{player_str}', banker='{banker_str}'")
-    else:
-        match_id = re.search(r'#N(\d+)', text)
-        if match_id:
-            raw_id = int(match_id.group(1))
-            logger.warning(f"Не удалось разобрать игру #{raw_id}: {text[:50]}...")
-
     return None
 
 
@@ -110,7 +125,7 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     raw_id = game["raw_id"]
-    logger.info(f"📥 Игра #{raw_id}: Игрок={game['player_ranks']}, Банкир={game['banker_ranks']}")
+    logger.info(f"📥 Игра #{raw_id}: Игрок={game['player_ranks']}({game['player_suits']})")
 
     # Сохранение истории
     history = load_json(HISTORY_FILE, [])
@@ -118,19 +133,16 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append(game)
     save_json(HISTORY_FILE, history[-300:])
 
-    # === 1. ПРОВЕРКА АКТИВНЫХ ПРОГНОЗОВ ===
-    active_preds = load_json(RANK_PRED_FILE, [])
-    updated_preds = []
+    # =========================================================================
+    # 1. ОБРАБОТКА ПРОГНОЗОВ РАНГОВ (+3 игры)
+    # =========================================================================
+    active_rank_preds = load_json(RANK_PRED_FILE, [])
+    updated_rank_preds = []
 
-    for pred in active_preds:
-        target_raw = pred["target_raw"]
-        target_rank = pred["target_rank"]
-        offset = raw_id - target_raw
-
-        # Если игра входит в диапазон проверки (Основная + 2 догона)
+    for pred in active_rank_preds:
+        offset = raw_id - pred["target_raw"]
         if 0 <= offset < CHECK_RANGE:
-            # Ищем ранг в картах Игрока или Банкира
-            is_success = target_rank in game["all_ranks"]
+            is_success = pred["target_rank"] in game["all_ranks"]
             stats = load_json(STATS_RANK_FILE, {"success": 0, "fail": 0})
 
             if is_success:
@@ -140,46 +152,37 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=PRED_CHANNEL,
                         message_id=pred["msg_id"],
                         text=f"✅ Игра №{pred['target']}\n"
-                             f"🎴 Значение: *{target_rank}* обоим\n"
-                             f"🎯 *ДА* → ✅{emoji}"
+                             f"🎴 Значение: *{pred['target_rank']}* обоим\n"
+                             f"🎯 *ДА* → ✅{emoji}",
+                        parse_mode="Markdown"
                     )
                     stats["success"] = stats.get("success", 0) + 1
                     save_json(STATS_RANK_FILE, stats)
-                    logger.info(f"🎉 Прогноз на карту {target_rank} в игре #{pred['target']} зашел (шаг {offset})")
                 except Exception as e:
-                    logger.error(f"Ошибка редактирования сообщения успехом: {e}")
-                # Прогноз закрыт, не добавляем его обратно в список активных
+                    logger.error(f"Ошибка редактирования ранга: {e}")
                 continue
-
             elif offset == CHECK_RANGE - 1:
-                # Если это был последний догон и ранг так и не выпал
                 try:
                     await context.bot.edit_message_text(
                         chat_id=PRED_CHANNEL,
                         message_id=pred["msg_id"],
                         text=f"❌ Игра №{pred['target']}\n"
-                             f"🎴 Значение: *{target_rank}* обоим\n"
-                             f"🎯 *ДА* 💥 Не зашёл"
+                             f"🎴 Значение: *{pred['target_rank']}* обоим\n"
+                             f"🎯 *ДА* 💥 Не зашёл",
+                        parse_mode="Markdown"
                     )
                     stats["fail"] = stats.get("fail", 0) + 1
                     save_json(STATS_RANK_FILE, stats)
-                    logger.info(f"💥 Прогноз на карту {target_rank} в игре #{pred['target']} провалился")
                 except Exception as e:
-                    logger.error(f"Ошибка редактирования сообщения провалом: {e}")
-                # Прогноз закрыт
+                    logger.error(f"Ошибка редактирования ранга: {e}")
                 continue
+        updated_rank_preds.append(pred)
+    save_json(RANK_PRED_FILE, updated_rank_preds)
 
-        # Если прогноз еще актуален и его время не истекло — оставляем
-        updated_preds.append(pred)
-
-    save_json(RANK_PRED_FILE, updated_preds)
-
-    # === 2. СОЗДАНИЕ НОВОГО ПРОГНОЗА ===
-    # Проверяем, есть ли у Игрока хотя бы 2 карты
+    # Создание прогноза ранга (+3 игры)
     if len(game["player_ranks"]) >= 2:
-        second_card_rank = game["player_ranks"][1]  # Индекс 1 = вторая карта игрока
-
-        target_raw = raw_id + PREDICT_OFFSET
+        second_card_rank = game["player_ranks"][1]
+        target_raw = raw_id + 4
         target_norm = (target_raw - 1) % TOTAL_GAMES + 1
 
         try:
@@ -190,39 +193,141 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏳ Ожидание..."
             )
             sent = await context.bot.send_message(chat_id=PRED_CHANNEL, text=pred_text, parse_mode="Markdown")
-
-            # Сохраняем новый прогноз в массив
-            new_pred = {
+            updated_rank_preds.append({
                 "target_raw": target_raw,
                 "target": target_norm,
                 "target_rank": second_card_rank,
                 "msg_id": sent.message_id
-            }
-            updated_preds.append(new_pred)
-            save_json(RANK_PRED_FILE, updated_preds)
-
-            logger.info(f"📤 Выставлен прогноз на карту '{second_card_rank}' на игру #{target_norm} (+{PREDICT_OFFSET})")
+            })
+            save_json(RANK_PRED_FILE, updated_rank_preds)
         except Exception as e:
-            logger.error(f"Ошибка отправки прогноза ранга: {e}")
+            logger.error(f"Ошибка отправки прогноза рангов: {e}")
+
+    # =========================================================================
+    # 2. ОБРАБОТКА И ПУБЛИКАЦИЯ ПРОГНОЗОВ МАСТЕЙ (+7 игр)
+    # =========================================================================
+    active_suit_pred = load_json(SUIT_PRED_FILE, {})
+    suit_queue = load_json(SUIT_QUEUE_FILE, {})
+
+    # A) Проверка опубликованного прогноза
+    if active_suit_pred and "target_raw" in active_suit_pred:
+        offset = raw_id - active_suit_pred["target_raw"]
+        if 0 <= offset < CHECK_RANGE:
+            # Проверяем наличие масти ТОЛЬКО У ИГРОКА
+            is_success = active_suit_pred["target_suit"] in game["player_suits"]
+            stats = load_json(STATS_SUIT_FILE, {"success": 0, "fail": 0})
+
+            if is_success:
+                emoji = ["0️⃣", "1️⃣", "2️⃣"][offset]
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=SUIT_PRED_CHANNEL,
+                        message_id=active_suit_pred["msg_id"],
+                        text=f"✅ Игра №{active_suit_pred['target']}\n"
+                             f"🎨 Игрок масть: *{SUIT_NAMES[active_suit_pred['target_suit']]}*\n"
+                             f"🎯 *ДА* → ✅{emoji}",
+                        parse_mode="Markdown"
+                    )
+                    stats["success"] = stats.get("success", 0) + 1
+                    save_json(STATS_SUIT_FILE, stats)
+                    active_suit_pred = {}
+                    save_json(SUIT_PRED_FILE, {})
+                except Exception as e:
+                    logger.error(f"Ошибка обновления прогноза масти: {e}")
+
+            elif offset == CHECK_RANGE - 1:
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=SUIT_PRED_CHANNEL,
+                        message_id=active_suit_pred["msg_id"],
+                        text=f"❌ Игра №{active_suit_pred['target']}\n"
+                             f"🎨 Игрок масть: *{SUIT_NAMES[active_suit_pred['target_suit']]}*\n"
+                             f"🎯 *ДА* 💥 Не зашёл",
+                        parse_mode="Markdown"
+                    )
+                    stats["fail"] = stats.get("fail", 0) + 1
+                    save_json(STATS_SUIT_FILE, stats)
+                    active_suit_pred = {}
+                    save_json(SUIT_PRED_FILE, {})
+                except Exception as e:
+                    logger.error(f"Ошибка обновления прогноза масти: {e}")
+
+    # Б) Публикация из очереди (когда осталось 2 игры: publish_raw == current_raw)
+    if not active_suit_pred and suit_queue:
+        if raw_id >= suit_queue.get("publish_raw", 0):
+            try:
+                pred_text = (
+                    f"🔥 Игра №{suit_queue['target']}\n"
+                    f"🎨 Игрок масть: *{SUIT_NAMES[suit_queue['target_suit']]}*\n"
+                    f"🎯 *ДА*\n"
+                    f"⏳ Ожидание..."
+                )
+                sent = await context.bot.send_message(chat_id=SUIT_PRED_CHANNEL, text=pred_text, parse_mode="Markdown")
+
+                active_suit_pred = {
+                    "target_raw": suit_queue["target_raw"],
+                    "target": suit_queue["target"],
+                    "target_suit": suit_queue["target_suit"],
+                    "msg_id": sent.message_id
+                }
+                save_json(SUIT_PRED_FILE, active_suit_pred)
+
+                # Очищаем очередь после отправки
+                suit_queue = {}
+                save_json(SUIT_QUEUE_FILE, {})
+                logger.info(f"📤 Опубликован прогноз масти на игру #{active_suit_pred['target']}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки прогноза масти в канал: {e}")
+
+    # В) Постановка НОВОГО прогноза мастей в очередь (если ВСЕ пусто: и в канале, и в очереди)
+    if not active_suit_pred and not suit_queue:
+        if len(game["player_suits"]) >= 2:
+            second_card_suit = game["player_suits"][1]  # 2-я карта игрока
+            target_suit = SUIT_MIRROR.get(second_card_suit)
+
+            if target_suit:
+                target_raw = raw_id + 7
+                target_norm = (target_raw - 1) % TOTAL_GAMES + 1
+                publish_raw = raw_id + 5  # Публикация за 2 игры до целевой
+
+                suit_queue = {
+                    "source_raw": raw_id,
+                    "publish_raw": publish_raw,
+                    "target_raw": target_raw,
+                    "target": target_norm,
+                    "target_suit": target_suit
+                }
+                save_json(SUIT_QUEUE_FILE, suit_queue)
+                logger.info(f"⏳ Запланирован прогноз масти '{target_suit}' на игру #{target_norm} (публикация в #{publish_raw})")
 
 
 # === КОМАНДА /stats ===
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != PRED_CHANNEL:
-        return
+    chat_id = update.effective_chat.id
 
-    stats = load_json(STATS_RANK_FILE, {"success": 0, "fail": 0})
-    total = stats["success"] + stats["fail"]
-    rate = (stats["success"] / total * 100) if total > 0 else 0
+    if chat_id == PRED_CHANNEL:
+        stats = load_json(STATS_RANK_FILE, {"success": 0, "fail": 0})
+        total = stats["success"] + stats["fail"]
+        rate = (stats["success"] / total * 100) if total > 0 else 0
 
-    msg = (
-        "📊 *Статистика прогнозов рангов карт*\n\n"
-        f"🔹 *Прогноз на 2-ю карту игрока (+3 игры)*\n"
-        f"Успехов: {stats['success']}, Провалов: {stats['fail']}\n"
-        f"Всего сигналов: {total}\n"
-        f"Успешность: *{rate:.1f}%*"
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+        msg = (
+            "📊 *Статистика прогнозов рангов*\n\n"
+            f"Успехов: {stats['success']}, Провалов: {stats['fail']}\n"
+            f"Всего: {total}, Успешность: *{rate:.1f}%*"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    elif chat_id == SUIT_PRED_CHANNEL:
+        stats = load_json(STATS_SUIT_FILE, {"success": 0, "fail": 0})
+        total = stats["success"] + stats["fail"]
+        rate = (stats["success"] / total * 100) if total > 0 else 0
+
+        msg = (
+            "📊 *Статистика прогнозов мастей Игроку*\n\n"
+            f"Успехов: {stats['success']}, Провалов: {stats['fail']}\n"
+            f"Всего: {total}, Успешность: *{rate:.1f}%*"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 # === ЗАПУСК ===
@@ -232,7 +337,7 @@ def main():
     app.add_handler(MessageHandler(filters.Chat(SOURCE_CHAT_ID) & filters.TEXT, handle_update))
     app.add_handler(CommandHandler("stats", stats_command))
 
-    logger.info("✅ Бот прогнозирования рангов карт запущен (+3 игры, 2 догона)")
+    logger.info("✅ Бот запущен: раздельные каналы для Рангов (+3) и Мастей (+7 с отложенным постом)")
     app.run_polling(drop_pending_updates=True)
 
 
