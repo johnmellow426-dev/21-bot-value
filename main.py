@@ -1,15 +1,10 @@
 import os
 import re
 import asyncio
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import Message
-import uvicorn
+from aiogram.filters import CommandStart
 
-# === НАСТРОЙКИ ===
 TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("RAILWAY_PUBLIC_DOMAIN")
 SOURCE = int(os.getenv("SOURCE_CHANNEL"))
 TARGET = int(os.getenv("TARGET_CHANNEL"))
 
@@ -20,10 +15,10 @@ games = {}
 pending = {}
 
 def opposite_suit(s):
-    return {'♠':'♥','♥':'♠','♦':'♣','♣':'♦'}[s]
+    return {'':'♥','♥':'♠','♦':'♣','♣':'♦'}[s]
 
 @dp.channel_post()
-async def on_channel_post(msg: Message):
+async def on_channel_post(msg: types.Message):
     if msg.chat.id != SOURCE or not msg.text:
         return
     
@@ -35,14 +30,10 @@ async def on_channel_post(msg: Message):
     cards = re.findall(r'([0-9AJQK]+)([♠♥♦♣])', m.group(2).replace('️',''))
     games[n] = cards
     
-    # Сброс при 1440
     if n == 1440:
         await reset_daily()
     
-    # Прогноз
     await try_predict(n)
-    
-    # Проверка ожидающих
     await check_pending(n)
 
 async def try_predict(n):
@@ -61,12 +52,12 @@ async def try_predict(n):
     end_check = target+2 if target+2 <= 1440 else (target+2) - 1440
     
     text = (
-        f"<code>💎 #{target} → {s}{opp_s} ИГРОК\n"
+        f"💎 #{target} → {s}{opp_s}\n"
         f"⏳ Диапазон: #{target} - #{end_check}\n"
-        f"⚡ Догон 2</code>"
+        f"⚡ Догон 2"
     )
     
-    sent = await bot.send_message(TARGET, text, parse_mode="HTML")
+    sent = await bot.send_message(TARGET, text)
     pending[target] = {
         "rank": rank,
         "msg_id": sent.message_id,
@@ -77,60 +68,34 @@ async def try_predict(n):
 
 async def check_pending(n):
     for t, info in list(pending.items()):
-        check_range = [t, t+1, t+2]
-        check_range = [(x-1440 if x > 1440 else x) for x in check_range]
+        check_range = [(t+i-1440 if t+i>1440 else t+i) for i in range(3)]
         
         if n in check_range and n not in info["done"]:
             info["done"].add(n)
             if n in games and any(c[0] == info["rank"] for c in games[n]):
-                result_text = f"<code>✅ Зашел на #{n} [Основная игра ⚡]</code>"
-                await bot.edit_message_text(
-                    TARGET, 
-                    info["msg_id"], 
-                    info["text"] + "\n\n" + result_text, 
-                    parse_mode="HTML"
-                )
+                result = f"✅ Зашел на #{n} [Основная игра ⚡]"
+                await bot.edit_message_text(TARGET, info["msg_id"], info["text"] + "\n\n" + result)
                 pending.pop(t)
                 return
         
         if len(info["done"]) >= 3 and t in pending:
-            result_text = f"<code>❌ Не зашел [Догон ❌]</code>"
-            await bot.edit_message_text(
-                TARGET, 
-                info["msg_id"], 
-                info["text"] + "\n\n" + result_text, 
-                parse_mode="HTML"
-            )
+            result = f"❌ Не зашел [Догон ❌]"
+            await bot.edit_message_text(TARGET, info["msg_id"], info["text"] + "\n\n" + result)
             pending.pop(t)
 
 async def reset_daily():
     for t, info in list(pending.items()):
-        result_text = f"<code> СУТОК ПРОШЛИ</code>"
-        await bot.edit_message_text(
-            TARGET, 
-            info["msg_id"], 
-            info["text"] + "\n\n" + result_text, 
-            parse_mode="HTML"
-        )
+        await bot.edit_message_text(TARGET, info["msg_id"], info["text"] + "\n\n⏰ СУТОК ПРОШЛИ")
         pending.pop(t)
     games.clear()
 
-# === FASTAPI + WEBHOOK ===
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    webhook_url = f"https://{WEBHOOK_URL}/webhook"
-    await bot.set_webhook(webhook_url)
-    yield
+@dp.message(CommandStart())
+async def cmd_start(msg: types.Message):
+    await msg.answer("Бот запущен! Ожидаю игры...")
+
+async def main():
     await bot.delete_webhook()
-
-app = FastAPI(lifespan=lifespan)
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
-    update = types.Update(**data)
-    await dp.feed_update(bot, update)
-    return {"ok": True}
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    asyncio.run(main())
