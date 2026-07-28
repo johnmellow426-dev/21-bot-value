@@ -3,17 +3,15 @@ import time
 import json
 import telebot
 import os
-from datetime import datetime
 
 # --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ СРЕДЫ RAILWAY ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-# ВНИМАНИЕ: Уберите gameId из URL, если API позволяет, или мы найдем способ его обновлять
+# ВАЖНО: Убедитесь, что в переменной API_URL на Railway НЕТ параметра &gameId=...
 API_URL = os.getenv("API_URL", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gr=1521&lng=ru&ref=8")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Максимально реалистичные заголовки браузера
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -23,6 +21,7 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
+# Глобальная переменная для хранения состояния
 current_game = {"num": 0, "last_update": ""}
 
 def get_card_symbol(card_value, suit_code):
@@ -34,10 +33,11 @@ def parse_cards_detail(cards_str):
     try:
         cards = json.loads(cards_str)
         return [get_card_symbol(c.get("CV", 0), c.get("CS", 0)) for c in cards]
-    except:
+    except Exception:
         return []
 
 def main():
+    global current_game  # Говорим Python использовать глобальную переменную
     print("🎮 Запуск трансляции...")
     session = requests.Session()
     
@@ -45,10 +45,10 @@ def main():
         try:
             resp = session.get(API_URL, headers=HEADERS, timeout=10)
             
-            # ДИАГНОСТИКА: Если это не JSON, мы узнаем почему
+            # Диагностика блокировок
             if "application/json" not in resp.headers.get("Content-Type", ""):
                 print(f"⚠️ БЛОКИРОВКА! Статус: {resp.status_code}")
-                print(f"Ответ сервера: {resp.text[:200]}") # Покажет Cloudflare или ошибку
+                print(f"Ответ сервера: {resp.text[:200]}")
                 time.sleep(10)
                 continue
 
@@ -77,12 +77,19 @@ def main():
                     bot.send_message(CHANNEL_ID, msg)
                     print(f"✅ Отправлено: {msg}")
                 
+                # Обновляем глобальную переменную
                 current_game = {"num": game_num, "last_update": current_state}
             
             time.sleep(3)
             
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Ошибка сети: {e}")
+            time.sleep(5)
+        except json.JSONDecodeError as e:
+            print(f"❌ Ошибка JSON: {e}")
+            time.sleep(5)
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            print(f"❌ Неизвестная ошибка: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
