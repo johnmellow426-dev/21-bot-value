@@ -31,6 +31,9 @@ HEADERS = {
 # --- ХРАНИЛИЩА ДАННЫХ ---
 active_games = {}
 game_history = {}
+
+# Глобальный трекинг для идеальной синхронизации номеров
+last_known_game_id = None
 last_assigned_game_num = None
 
 current_prediction = {
@@ -44,7 +47,7 @@ current_prediction = {
 }
 
 
-# --- ВПОМОГАТЕЛЬНЫЕ ФУНКЦИИ НУМЕРАЦИИ ---
+# --- ФУНКЦИИ ТОЧНОЙ НУМЕРАЦИИ ---
 
 def normalize_game_num(num):
     """Корректирует номер игры при переходе через 00:00 UTC (1..1440)"""
@@ -54,17 +57,28 @@ def normalize_game_num(num):
         num += 1440
     return num
 
-def get_utc_game_number(timestamp=None):
+def get_utc_game_number(timestamp):
+    """Рассчитывает номер минуты в сутках (1..1440) по времени UTC из API"""
     if timestamp:
+        # Если пришел timestamp в миллисекундах
+        if timestamp > 1e11:
+            timestamp /= 1000
         dt = datetime.datetime.fromtimestamp(timestamp, tz=timezone.utc)
     else:
         dt = datetime.datetime.now(timezone.utc)
     return (dt.hour * 60) + dt.minute + 1
 
 def extract_game_number(game_data):
-    global last_assigned_game_num
+    """
+    Извлекает номер игры на основе данных API Melbet.
+    Привязка идет к времени старта матча (S / startDate) и разнице ID.
+    """
+    global last_known_game_id, last_assigned_game_num
+    
+    current_id = game_data.get("id")
     calculated_num = None
 
+    # 1. Попытка взять явный короткий номер из полей API
     for key in ["num", "N", "I", "gameNum", "number"]:
         val = game_data.get(key)
         if val is not None:
@@ -76,15 +90,26 @@ def extract_game_number(game_data):
             except ValueError:
                 pass
 
+    # 2. Если явного номера нет — считаем по стартовому времени БК (S)
     if calculated_num is None:
         start_time = game_data.get("S") or game_data.get("startDate") or game_data.get("S_T")
         calculated_num = get_utc_game_number(start_time)
 
-    if last_assigned_game_num is not None:
-        if calculated_num <= last_assigned_game_num:
-            if not (last_assigned_game_num >= 1438 and calculated_num <= 3):
+    # 3. Синхронизация по последовательности ID
+    if last_known_game_id is not None and current_id is not None:
+        try:
+            id_diff = int(current_id) - int(last_known_game_id)
+            # Если это следующая по порядку игра (+1 по ID)
+            if id_diff == 1 and last_assigned_game_num is not None:
                 calculated_num = normalize_game_num(last_assigned_game_num + 1)
+            elif id_diff > 1 and last_assigned_game_num is not None:
+                calculated_num = normalize_game_num(last_assigned_game_num + id_diff)
+        except ValueError:
+            pass
 
+    if current_id:
+        last_known_game_id = int(current_id) if str(current_id).isdigit() else current_id
+    
     last_assigned_game_num = calculated_num
     return calculated_num
 
@@ -199,13 +224,11 @@ def finalize_prediction(status_code):
     except Exception as e:
         print(f"❌ Ошибка обновления прогноза: {e}")
 
-    # Расчет размера догона на следующий шаг
     if status_code >= 0:
         current_prediction["dogen_level"] = 1
     else:
         current_prediction["dogen_level"] *= 2
 
-    # Сбрасываем флаг, позволяя боту дать следующий прогноз
     current_prediction["is_active"] = False
     current_prediction["message_id"] = None
 
@@ -237,7 +260,7 @@ def get_active_games_info(session):
 
 def main():
     global active_games, game_history, current_prediction
-    print("🚀 Запуск: трансляция + новые прогнозы без двойных пробелов...")
+    print("🚀 Запуск: трансляция + синхронизированная нумерация по ID...")
     session = requests.Session()
     
     while True:
@@ -309,17 +332,17 @@ def main():
 
                         if game_num == target_num:
                             if is_hit:
-                                finalize_prediction(0)  # Заход в целевой игре ✅0️⃣
+                                finalize_prediction(0)
                         elif game_num == plus_1_num:
                             if is_hit:
-                                finalize_prediction(1)  # Заход в +1 игре ✅1️⃣
+                                finalize_prediction(1)
                         elif game_num == plus_2_num:
                             if is_hit:
-                                finalize_prediction(2)  # Заход в +2 игре ✅2️⃣
+                                finalize_prediction(2)
                             else:
-                                finalize_prediction(-1) # Захода не было за 3 игры ❌
+                                finalize_prediction(-1)
                     
-                    # 2. СОЗДАНИЕ НОВОГО ПРОГНОЗА (Если сейчас нет активных прогнозов)
+                    # 2. СОЗДАНИЕ НОВОГО ПРОГНОЗА
                     if first_card and not current_prediction.get("is_active"):
                         pred_val, pred_sym = get_prediction_for_card(first_card)
                         target_num = normalize_game_num(game_num + 3)
@@ -327,7 +350,7 @@ def main():
                         current_prediction["predicted_value"] = pred_val
                         send_new_prediction(game_num, pred_sym, target_num)
                 
-                # --- ТРАНСЛЯЦИЯ В ТЕЛЕГРАМ-КАНАЛ (БЕЗ ДВОЙНЫХ ПРОБЕЛОВ) ---
+                # --- ТРАНСЛЯЦИЯ В ТЕЛЕГРАМ-КАНАЛ ---
                 current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
                 
                 if current_state != slot["last_state"] and (p1_cards or p2_cards):
