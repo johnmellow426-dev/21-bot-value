@@ -18,21 +18,33 @@ HEADERS = {
     "Referer": "https://melbet-8093.pro/",
 }
 
+# Состояние
 current_game_id = None
+current_game_num = None  # Номер игры (кешируется при старте)
 current_message_id = None
 last_update_state = ""
 
 def get_utc_game_number():
+    """00:00 → 1, 23:59 → 1440"""
     now = datetime.datetime.now(datetime.timezone.utc)
     return (now.hour * 60) + now.minute + 1
 
 def get_card_symbol(card_value, suit_code):
     suits = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
-    values = {1: "A", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "J", 12: "Q", 13: "K"}
-    return f"{values.get(card_value, '?')}{suits.get(suit_code, '?')}"
+    # Туз может приходить как 1 или 14 — обрабатываем оба варианта
+    values = {
+        1: "A", 14: "A",
+        2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10",
+        11: "J", 12: "Q", 13: "K"
+    }
+    suit = suits.get(suit_code, "?")
+    value = values.get(card_value)
+    if value is None:
+        print(f"️ Неизвестный код карты: CV={card_value}, CS={suit_code}")
+        value = str(card_value)
+    return f"{value}{suit}"
 
 def parse_cards_detail(cards_str):
-    """Возвращает список символов для отображения и список значений карт для логики"""
     try:
         cards = json.loads(cards_str)
         symbols = []
@@ -43,7 +55,8 @@ def parse_cards_detail(cards_str):
             symbols.append(get_card_symbol(cv, cs))
             values.append(cv)
         return symbols, values
-    except Exception:
+    except Exception as e:
+        print(f"❌ Ошибка парсинга карт: {e}, raw={cards_str[:100]}")
         return [], []
 
 def get_active_game_id(session):
@@ -58,26 +71,45 @@ def get_active_game_id(session):
             return first_game["id"]
         return None
     except Exception as e:
-        print(f"❌ Ошибка получения списка игр: {e}")
+        print(f" Ошибка получения списка игр: {e}")
         return None
 
 def send_or_edit_message(msg, is_finished):
     global current_message_id
     try:
         if current_message_id is None:
-            sent = bot.send_message(CHANNEL_ID, msg)
+            sent = bot.send_message(CHANNEL_ID, msg, parse_mode=None)
             current_message_id = sent.message_id
+            print(f"📤 Создано новое сообщение, ID={current_message_id}")
         else:
-            bot.edit_message_text(chat_id=CHANNEL_ID, message_id=current_message_id, text=msg)
-            
+            bot.edit_message_text(
+                chat_id=CHANNEL_ID,
+                message_id=current_message_id,
+                text=msg,
+                parse_mode=None
+            )
+            print(f"✏️ Отредактировано сообщение ID={current_message_id}")
+        
+        # Сбрасываем ID только после финального редактирования завершённой игры
         if is_finished:
+            print(f"🏁 Игра завершена, сбрасываем message_id для следующей игры")
             current_message_id = None
+    except telebot.apihelper.ApiTelegramException as e:
+        print(f"❌ Telegram API ошибка: {e}. Сбрасываем message_id.")
+        current_message_id = None
+        # Пробуем отправить как новое
+        try:
+            sent = bot.send_message(CHANNEL_ID, msg, parse_mode=None)
+            current_message_id = sent.message_id if not is_finished else None
+        except Exception as e2:
+            print(f"❌ Повторная отправка тоже не удалась: {e2}")
     except Exception as e:
-        print(f" Ошибка отправки/редактирования: {e}")
+        print(f"❌ Ошибка отправки/редактирования: {e}")
+        current_message_id = None
 
 def main():
-    global current_game_id, last_update_state
-    print("🎮 Трансляция запущена (с Золотым очком и правильным форматом)...")
+    global current_game_id, current_game_num, last_update_state
+    print("🎮 Трансляция запущена (исправлены туз, редактирование, нумерация)...")
     session = requests.Session()
     
     while True:
@@ -88,11 +120,13 @@ def main():
                 time.sleep(5)
                 continue
             
+            # Если новая игра — сбрасываем всё и кешируем номер
             if active_id != current_game_id:
                 current_game_id = active_id
+                current_game_num = get_utc_game_number()  # Кешируем номер на старте
                 last_update_state = ""
                 current_message_id = None
-                print(f"🔄 Новая игра! ID: {active_id}")
+                print(f"🔄 Новая игра #{current_game_num} (ID: {active_id})")
 
             stat_url = STATISTIC_URL_TEMPLATE.format(game_id=active_id)
             resp = session.get(stat_url, headers=HEADERS, timeout=10)
@@ -102,7 +136,6 @@ def main():
                 continue
             
             data = resp.json()
-            game_num = get_utc_game_number()
             score_detail = data.get("fullScoreDetail", {})
             p1_score = score_detail.get("scoreOpp1", 0)
             p2_score = score_detail.get("scoreOpp2", 0)
@@ -121,12 +154,14 @@ def main():
                 cards_p2 = " ".join(p2_cards) if p2_cards else "?"
                 
                 if not is_finished:
-                    if p1_score < 17: arrow = "◀️"
-                    elif p2_score < 17: arrow = "▶️"
-                    else: arrow = "👈"
-                    msg = f"🕒 #N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
+                    if p1_score < 17:
+                        arrow = "◀️"
+                    elif p2_score < 17:
+                        arrow = "▶️"
+                    else:
+                        arrow = "👈"
+                    msg = f" #N{current_game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
                 else:
-                    # Определение результата
                     p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
                     p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
                     draw = (p1_score == p2_score) or (p1_score > 21 and p2_score > 21)
@@ -135,30 +170,25 @@ def main():
                     res_p2 = "✅" if p2_win else ("🔰" if draw else "")
                     
                     tags = []
-                    
-                    # #O🔵 - Никто набрал 21 очко
                     if p1_score == 21 or p2_score == 21:
                         tags.append("#O🔵")
-                        
-                    # #G🔴 - Золотое очко (ровно две карты, и обе Тузы - CV == 1)
-                    is_p1_golden = (len(p1_values) == 2 and all(v == 1 for v in p1_values))
-                    is_p2_golden = (len(p2_values) == 2 and all(v == 1 for v in p2_values))
-                    if is_p1_golden or is_p2_golden:
-                        tags.append("#G🔴")
-                        
-                    # #R🟢 - Завершилась на раздаче (у победителя ровно 2 карты)
-                    if (p1_win and len(p1_cards) == 2) or (p2_win and len(p2_cards) == 2) or (draw and len(p1_cards) == 2 and len(p2_cards) == 2):
-                        tags.append("#R🟢")
-                        
-                    tags_str = " ".join(tags)
                     
-                    # Формат как в примере: #N720. 12(9♥️Q♥️) - ✅21(A♠️A♦️) #T33 #R🟢 #G🔴 #O🔵
-                    msg = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points} {tags_str}".strip()
+                    is_p1_golden = (len(p1_values) == 2 and all(v in (1, 14) for v in p1_values))
+                    is_p2_golden = (len(p2_values) == 2 and all(v in (1, 14) for v in p2_values))
+                    if is_p1_golden or is_p2_golden:
+                        tags.append("#G")
+                    
+                    if len(p1_cards) == 2 and len(p2_cards) == 2:
+                        tags.append("#R🟢")
+                    
+                    tags_str = " ".join(tags)
+                    msg = f"#N{current_game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points} {tags_str}".strip()
                 
                 send_or_edit_message(msg, is_finished)
-                print(f"✅ {msg}")
-                
                 last_update_state = current_state
+                
+                if is_finished:
+                    time.sleep(5)
             
             time.sleep(5)
             
