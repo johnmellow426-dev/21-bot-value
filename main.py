@@ -31,6 +31,7 @@ HEADERS = {
 # --- ХРАНИЛИЩА ДАННЫХ ---
 active_games = {}
 game_history = {}
+last_assigned_game_num = None  # Глобальный счетчик для предотвращения дубликатов!
 
 current_prediction = {
     "message_id": None,
@@ -50,10 +51,10 @@ prediction_stats = {"total": 0, "wins": 0, "losses": 0}
 
 def normalize_game_num(num):
     """Корректирует номер игры при переходе через 00:00 UTC (1..1440)"""
-    if num > 1440:
-        return num - 1440
-    if num < 1:
-        return num + 1440
+    while num > 1440:
+        num -= 1440
+    while num < 1:
+        num += 1440
     return num
 
 def get_utc_game_number(timestamp=None):
@@ -66,28 +67,40 @@ def get_utc_game_number(timestamp=None):
 
 def extract_game_number(game_data):
     """
-    Извлекает суточный номер игры (#N883 и т.д.) из API Мелбета, 
-    фильтруя системные уникальные ID вроде 258081.
+    Извлекает суточный номер игры с гарантией того,
+    что каждая новая игра получает уникальный номер (+1 к предыдущей).
     """
+    global last_assigned_game_num
+    
+    calculated_num = None
+
     # 1. Попытка взять явный короткий номер из полей API
     for key in ["num", "N", "I", "gameNum", "number"]:
         val = game_data.get(key)
         if val is not None:
             try:
                 num_int = int(val)
-                # Порядковый номер игры в сутках строго в диапазоне 1..1440
                 if 1 <= num_int <= 1440:
-                    return num_int
+                    calculated_num = num_int
+                    break
             except ValueError:
                 pass
 
-    # 2. Если поле num отсутствует/содержит системный ID — считаем номер по времени старта матча (S / startDate)
-    start_time = game_data.get("S") or game_data.get("startDate") or game_data.get("S_T")
-    if start_time:
-        return get_utc_game_number(start_time)
+    # 2. Расчет по времени старта или текущему UTC
+    if calculated_num is None:
+        start_time = game_data.get("S") or game_data.get("startDate") or game_data.get("S_T")
+        calculated_num = get_utc_game_number(start_time)
 
-    # 3. Фолбэк на текущее время UTC
-    return get_utc_game_number()
+    # 3. Защита от дублирования номеров!
+    if last_assigned_game_num is not None:
+        # Если новая игра накладывается на предыдущий номер или отстает
+        if calculated_num <= last_assigned_game_num:
+            # Если это не сброс суток (например, 1440 -> 1)
+            if not (last_assigned_game_num >= 1438 and calculated_num <= 3):
+                calculated_num = normalize_game_num(last_assigned_game_num + 1)
+
+    last_assigned_game_num = calculated_num
+    return calculated_num
 
 
 # --- КАРТЫ И ЛОГИКА ---
@@ -250,7 +263,7 @@ def get_active_games_info(session):
 
 def main():
     global active_games, game_history, current_prediction
-    print("🚀 Запуск: трансляция + стратегия прогнозов (номера по суточной сетке UTC)...")
+    print("🚀 Запуск: трансляция + стратегия прогнозов (с контролем последовательности номеров)...")
     session = requests.Session()
     
     while True:
@@ -263,10 +276,10 @@ def main():
             current_game_ids = set(g["id"] for g in games_info)
             
             for g_info in games_info:
-                game_id = g_info["id"]  # Используем глобальный ID для работы словаря
+                game_id = g_info["id"]  # Системный ID для ключа
                 
                 if game_id not in active_games:
-                    # Извлекаем красивый суточный номер (1..1440) для вывода в Telegram
+                    # Извлекаем уникальный суточный номер (гарантирует отсутствие дублей)
                     game_num = extract_game_number(g_info["raw_data"])
                     active_games[game_id] = {
                         "message_id": None,
@@ -274,7 +287,7 @@ def main():
                         "last_state": "",
                         "is_finished": False
                     }
-                    print(f"🆕 Начата игра #{game_num} (Системный ID: {game_id})")
+                    print(f"🆕 Начата игра #{game_num} (ID в базе: {game_id})")
                 
                 slot = active_games[game_id]
                 game_num = slot["game_num"]
@@ -317,7 +330,6 @@ def main():
                     if current_prediction.get("target_game_num") and not current_prediction["is_checked"]:
                         target = current_prediction["target_game_num"]
                         
-                        # Диапазон проверки (целевая игра и 2 игры до нее) с учетом смены суток
                         check_range = [
                             normalize_game_num(target - 2),
                             normalize_game_num(target - 1),
@@ -393,7 +405,7 @@ def main():
                     if is_finished:
                         slot["is_finished"] = True
             
-            # Очистка завершенных игр из памяти
+            # Очистка завершенных игр
             finished_to_remove = [
                 gid for gid, data in active_games.items() 
                 if data["is_finished"] and gid not in current_game_ids
