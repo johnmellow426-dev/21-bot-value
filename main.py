@@ -4,10 +4,8 @@ import json
 import telebot
 import os
 
-# --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ СРЕДЫ RAILWAY ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-# ВАЖНО: Убедитесь, что в переменной API_URL на Railway НЕТ параметра &gameId=...
 API_URL = os.getenv("API_URL", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gr=1521&lng=ru&ref=8")
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -21,7 +19,6 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-# Глобальная переменная для хранения состояния
 current_game = {"num": 0, "last_update": ""}
 
 def get_card_symbol(card_value, suit_code):
@@ -37,24 +34,27 @@ def parse_cards_detail(cards_str):
         return []
 
 def main():
-    global current_game  # Говорим Python использовать глобальную переменную
+    global current_game
     print("🎮 Запуск трансляции...")
     session = requests.Session()
+    loop_count = 0
     
     while True:
+        loop_count += 1
         try:
+            # print(f"🔄 Попытка #{loop_count}...") # Раскомментируйте, если хотите видеть каждый запрос
+            
             resp = session.get(API_URL, headers=HEADERS, timeout=10)
             
-            # Диагностика блокировок
             if "application/json" not in resp.headers.get("Content-Type", ""):
                 print(f"⚠️ БЛОКИРОВКА! Статус: {resp.status_code}")
-                print(f"Ответ сервера: {resp.text[:200]}")
+                print(f"Ответ: {resp.text[:200]}")
                 time.sleep(10)
                 continue
 
             data = resp.json()
             game_num = data.get("num", 0)
-            status = data.get("currentPeriodName", "")
+            status = data.get("currentPeriodName", "Неизвестно")
             score_detail = data.get("fullScoreDetail", {})
             p1_score = score_detail.get("scoreOpp1", 0)
             p2_score = score_detail.get("scoreOpp2", 0)
@@ -63,11 +63,15 @@ def main():
             p1_cards = parse_cards_detail(stat.get("P1", "[]"))
             p2_cards = parse_cards_detail(stat.get("P2", "[]"))
             
+            # ДИАГНОСТИКА: Печатаем состояние каждые 10 циклов или при изменении
+            if loop_count % 10 == 0 or game_num != current_game["num"]:
+                print(f"📡 Игра #{game_num} | Статус: {status} | Счет: {p1_score}-{p2_score} | Карты: {p1_cards} vs {p2_cards}")
+
             is_finished = (status == "Игра завершена")
             current_state = f"{game_num}_{p1_score}_{p2_score}_{'_'.join(p1_cards)}"
             
             if game_num != current_game["num"] or current_state != current_game["last_update"]:
-                if p1_cards or p2_cards:
+                if p1_cards or p2_cards: # Отправляем только когда появились карты
                     cards_p1 = " ".join(p1_cards) if p1_cards else "?"
                     cards_p2 = " ".join(p2_cards) if p2_cards else "?"
                     arrow = "👈" if not is_finished else ""
@@ -75,13 +79,15 @@ def main():
                     
                     msg = f"{result} #N{game_num}. {p1_score}({cards_p1}){arrow} {p2_score}({cards_p2})"
                     bot.send_message(CHANNEL_ID, msg)
-                    print(f"✅ Отправлено: {msg}")
+                    print(f"✅ ОТПРАВЛЕНО В TELEGRAM: {msg}")
                 
-                # Обновляем глобальную переменную
                 current_game = {"num": game_num, "last_update": current_state}
             
             time.sleep(3)
             
+        except requests.exceptions.Timeout:
+            print("❌ Таймаут запроса (сервер не отвечает)")
+            time.sleep(5)
         except requests.exceptions.RequestException as e:
             print(f"❌ Ошибка сети: {e}")
             time.sleep(5)
