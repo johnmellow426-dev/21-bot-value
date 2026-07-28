@@ -6,7 +6,7 @@ import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-API_URL = os.getenv("API_URL", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gr=1521&lng=ru&ref=8")
+API_URL = os.getenv("API_URL", "   https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gameId=739799539&gr=1521&lng=ru&ref=8")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
