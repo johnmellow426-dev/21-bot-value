@@ -3,6 +3,7 @@ import time
 import json
 import telebot
 import os
+import datetime
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
@@ -18,9 +19,12 @@ HEADERS = {
 }
 
 current_game_id = None
-current_game_num = None  # Номер игры из gamesByChamp
+current_message_id = None
 last_update_state = ""
-total_counter = 0  # Счетчик тоталов/раундов
+
+def get_utc_game_number():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return (now.hour * 60) + now.minute + 1
 
 def get_card_symbol(card_value, suit_code):
     suits = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
@@ -28,110 +32,139 @@ def get_card_symbol(card_value, suit_code):
     return f"{values.get(card_value, '?')}{suits.get(suit_code, '?')}"
 
 def parse_cards_detail(cards_str):
+    """Возвращает список символов для отображения и список значений карт для логики"""
     try:
         cards = json.loads(cards_str)
-        return [get_card_symbol(c.get("CV", 0), c.get("CS", 0)) for c in cards]
+        symbols = []
+        values = []
+        for c in cards:
+            cv = c.get("CV", 0)
+            cs = c.get("CS", 0)
+            symbols.append(get_card_symbol(cv, cs))
+            values.append(cv)
+        return symbols, values
     except Exception:
-        return []
+        return [], []
 
-def get_active_game_info(session):
-    """Возвращает ID и номер текущей игры"""
+def get_active_game_id(session):
     try:
         resp = session.get(VIRTUAL_URL, headers=HEADERS, timeout=10)
         data = resp.json()
         games = data.get("games", [])
         if not isinstance(games, list) or not games:
-            return None, None
-        
+            return None
         first_game = games[0]
-        if isinstance(first_game, dict):
-            return first_game.get("id"), first_game.get("num")
-        return None, None
+        if isinstance(first_game, dict) and "id" in first_game:
+            return first_game["id"]
+        return None
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        return None, None
+        print(f"❌ Ошибка получения списка игр: {e}")
+        return None
+
+def send_or_edit_message(msg, is_finished):
+    global current_message_id
+    try:
+        if current_message_id is None:
+            sent = bot.send_message(CHANNEL_ID, msg)
+            current_message_id = sent.message_id
+        else:
+            bot.edit_message_text(chat_id=CHANNEL_ID, message_id=current_message_id, text=msg)
+            
+        if is_finished:
+            current_message_id = None
+    except Exception as e:
+        print(f" Ошибка отправки/редактирования: {e}")
 
 def main():
-    global current_game_id, current_game_num, last_update_state, total_counter
-    print("🎮 Трансляция запущена...")
+    global current_game_id, last_update_state
+    print("🎮 Трансляция запущена (с Золотым очком и правильным форматом)...")
     session = requests.Session()
     
     while True:
         try:
-            active_id, active_num = get_active_game_info(session)
+            active_id = get_active_game_id(session)
             
             if not active_id:
                 time.sleep(5)
                 continue
             
-            # Если новая игра - сбрасываем счетчик тоталов
             if active_id != current_game_id:
                 current_game_id = active_id
-                current_game_num = active_num
                 last_update_state = ""
-                total_counter = 0
-                print(f"🔄 Новая игра #{active_num} (ID: {active_id})")
-            
-            # Получаем статистику
+                current_message_id = None
+                print(f"🔄 Новая игра! ID: {active_id}")
+
             stat_url = STATISTIC_URL_TEMPLATE.format(game_id=active_id)
             resp = session.get(stat_url, headers=HEADERS, timeout=10)
             
             if resp.status_code == 204 or not resp.text.strip():
-                time.sleep(3)
+                time.sleep(5)
                 continue
             
             data = resp.json()
+            game_num = get_utc_game_number()
             score_detail = data.get("fullScoreDetail", {})
             p1_score = score_detail.get("scoreOpp1", 0)
             p2_score = score_detail.get("scoreOpp2", 0)
+            total_points = p1_score + p2_score
             status = data.get("currentPeriodName", "")
             
             stat = data.get("statistic", {}).get("main", {})
-            p1_cards = parse_cards_detail(stat.get("P1", "[]"))
-            p2_cards = parse_cards_detail(stat.get("P2", "[]"))
+            p1_cards, p1_values = parse_cards_detail(stat.get("P1", "[]"))
+            p2_cards, p2_values = parse_cards_detail(stat.get("P2", "[]"))
             
             is_finished = (status == "Игра завершена")
             current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
             
             if current_state != last_update_state and (p1_cards or p2_cards):
-                total_counter += 1
                 cards_p1 = " ".join(p1_cards) if p1_cards else "?"
                 cards_p2 = " ".join(p2_cards) if p2_cards else "?"
                 
-                # Формат сообщения по вашему примеру
-                if is_finished:
-                    # Определяем результат
-                    if p1_score > 21 and p2_score > 21:
-                        result = "🔰"  # Ничья (оба перебор)
-                    elif p1_score == p2_score:
-                        result = "🔰"  # Ничья
-                    elif (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21):
-                        result = "✅"  # Игрок выиграл
-                    else:
-                        result = "✅"  # Дилер выиграл (можно добавить другой символ)
-                    
-                    msg = f"#N{current_game_num}. {result}{p1_score}({cards_p1}) - {p2_score}({cards_p2}) #T{total_counter*10} #O🔵"
+                if not is_finished:
+                    if p1_score < 17: arrow = "◀️"
+                    elif p2_score < 17: arrow = "▶️"
+                    else: arrow = "👈"
+                    msg = f"🕒 #N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
                 else:
-                    # Определяем кто добирает
-                    if p1_score < 17:
-                        arrow = "◀️"  # Добирает Игрок
-                    elif p2_score < 17:
-                        arrow = "▶️"  # Добирает Дилер
-                    else:
-                        arrow = "👈"
+                    # Определение результата
+                    p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
+                    p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
+                    draw = (p1_score == p2_score) or (p1_score > 21 and p2_score > 21)
                     
-                    msg = f"🕒 #N{current_game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_counter*10}"
+                    res_p1 = "✅" if p1_win else ("🔰" if draw else "")
+                    res_p2 = "✅" if p2_win else ("🔰" if draw else "")
+                    
+                    tags = []
+                    
+                    # #O🔵 - Никто набрал 21 очко
+                    if p1_score == 21 or p2_score == 21:
+                        tags.append("#O🔵")
+                        
+                    # #G🔴 - Золотое очко (ровно две карты, и обе Тузы - CV == 1)
+                    is_p1_golden = (len(p1_values) == 2 and all(v == 1 for v in p1_values))
+                    is_p2_golden = (len(p2_values) == 2 and all(v == 1 for v in p2_values))
+                    if is_p1_golden or is_p2_golden:
+                        tags.append("#G🔴")
+                        
+                    # #R🟢 - Завершилась на раздаче (у победителя ровно 2 карты)
+                    if (p1_win and len(p1_cards) == 2) or (p2_win and len(p2_cards) == 2) or (draw and len(p1_cards) == 2 and len(p2_cards) == 2):
+                        tags.append("#R🟢")
+                        
+                    tags_str = " ".join(tags)
+                    
+                    # Формат как в примере: #N720. 12(9♥️Q♥️) - ✅21(A♠️A♦️) #T33 #R🟢 #G🔴 #O🔵
+                    msg = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points} {tags_str}".strip()
                 
-                bot.send_message(CHANNEL_ID, msg)
+                send_or_edit_message(msg, is_finished)
                 print(f"✅ {msg}")
                 
                 last_update_state = current_state
-                
-                if is_finished:
-                    time.sleep(5)
             
-            time.sleep(2)
+            time.sleep(5)
             
+        except requests.exceptions.Timeout:
+            print("❌ Таймаут запроса")
+            time.sleep(5)
         except Exception as e:
             print(f"❌ Ошибка: {e}")
             time.sleep(5)
