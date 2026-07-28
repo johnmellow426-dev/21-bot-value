@@ -16,38 +16,35 @@ STATISTIC_URL_TEMPLATE = os.getenv("STATISTIC_URL_TEMPLATE", "https://melbet-809
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
     "Referer": "https://melbet-8093.pro/",
 }
 
-# Только старшие карты для прогнозирования
-FACE_CARDS = {11: "J", 12: "Q", 13: "K", 1: "A", 14: "A"}
+# Хранилище активных игр для трансляции
+active_games = {}
 
-game_history = []
-MAX_HISTORY = 100
+# История игр для прогнозов (game_num: {"player_first_card": X, "all_values": [...]})
+game_history = {}
+MAX_HISTORY_GAMES = 50
 
-current_predictions = {
-    "player": None,
-    "dealer": None,
+# Текущий активный прогноз
+current_prediction = {
     "message_id": None,
-    "game_id": None
+    "game_num": None,
+    "predicted_value": None,
+    "predicted_symbol": None,
+    "target_game_num": None,
+    "dogen_level": 1,
+    "is_checked": False
 }
 
+# Статистика прогнозов
 prediction_stats = {
     "total": 0,
-    "exact": 0,
-    "plus_minus_1": 0,
-    "plus_minus_2": 0,
-    "miss": 0
+    "wins": 0,
+    "losses": 0
 }
-
-MAX_SLOTS = 4
-slots = [{"game_id": None, "game_num": None, "message_id": None, "last_state": ""} for _ in range(MAX_SLOTS)]
-
-def get_utc_game_number():
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return (now.hour * 60) + now.minute + 1
 
 def get_card_symbol(card_value, suit_code):
     suits = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
@@ -57,313 +54,281 @@ def get_card_symbol(card_value, suit_code):
 def parse_cards_detail(cards_str):
     try:
         cards = json.loads(cards_str)
-        symbols = []
-        values = []
+        symbols, values = [], []
         for c in cards:
-            cv = c.get("CV", 0)
-            cs = c.get("CS", 0)
+            cv, cs = c.get("CV", 0), c.get("CS", 0)
             symbols.append(get_card_symbol(cv, cs))
             values.append(cv)
         return symbols, values
     except:
         return [], []
 
-def analyze_face_cards(target_values):
-    """Анализирует ТОЛЬКО старшие карты (A, K, Q, J) и предсказывает одну"""
-    if len(game_history) < 5:
-        return None
-    
-    # Считаем частоту ТОЛЬКО старших карт
-    face_card_counts = defaultdict(int)
-    total_face_cards = 0
-    
-    for game in game_history[-MAX_HISTORY:]:
-        all_values = game.get("player_values", []) + game.get("dealer_values", [])
-        for val in all_values:
-            if val in FACE_CARDS:  # Только J, Q, K, A
-                face_card_counts[val] += 1
-                total_face_cards += 1
-    
-    if not face_card_counts:
-        return None
-    
-    # Находим самую частую старшую карту
-    most_common = max(face_card_counts.items(), key=lambda x: x[1])
-    card_value = most_common[0]
-    count = most_common[1]
-    probability = (count / total_face_cards) * 100 if total_face_cards > 0 else 0
-    
-    return {
-        "value": card_value,
-        "symbol": FACE_CARDS[card_value],
-        "probability": probability,
-        "count": count,
-        "total": total_face_cards
-    }
+def get_prediction_for_card(card_value):
+    """Определяет прогнозируемое значение на основе первой карты Игрока"""
+    if card_value == 6:
+        return 13, "K (Король)"
+    elif card_value in [10, 7, 9]:
+        return 12, "Q (Дама)"
+    elif card_value == 8:
+        return 11, "J (Валет)"
+    else:
+        # "Много цифр в перемешку" - другие значения
+        return 1, "A (Туз)"
 
-def send_prediction():
-    """Отправляет прогноз на второй канал (только J, Q, K, A)"""
-    global current_predictions
-    
-    if not PREDICTION_CHANNEL_ID:
+def send_or_update_prediction():
+    """Отправляет или редактирует сообщение прогноза на канале"""
+    if not PREDICTION_CHANNEL_ID or not current_prediction.get("game_num"):
         return
     
-    player_pred = analyze_face_cards("player")
-    dealer_pred = analyze_face_cards("dealer")
+    dogen = current_prediction["dogen_level"]
+    game_num = current_prediction["game_num"]
+    symbol = current_prediction["predicted_symbol"]
+    target = current_prediction["target_game_num"]
     
-    if not player_pred or not dealer_pred:
-        return
+    if current_prediction["is_checked"]:
+        return  # Уже проверен
     
-    msg = f" **ПРОГНОЗ СТАРШИХ КАРТ** | Игра #{get_utc_game_number()}\n\n"
-    
-    msg += f"👤 **Игрок**: {player_pred['symbol']} ({player_pred['probability']:.1f}%)\n"
-    msg += f"   Выпадало: {player_pred['count']}/{player_pred['total']} раз\n\n"
-    
-    msg += f"🤖 **Дилер**: {dealer_pred['symbol']} ({dealer_pred['probability']:.1f}%)\n"
-    msg += f"   Выпадало: {dealer_pred['count']}/{dealer_pred['total']} раз\n\n"
-    
-    msg += f"📊 Статистика: {len(game_history)} игр\n"
-    accuracy = ((prediction_stats['exact'] + prediction_stats['plus_minus_1'] + prediction_stats['plus_minus_2']) / prediction_stats['total'] * 100) if prediction_stats['total'] > 0 else 0
-    msg += f"📈 Точность: {accuracy:.1f}% (Точных: {prediction_stats['exact']}, ±1: {prediction_stats['plus_minus_1']}, ±2: {prediction_stats['plus_minus_2']}, Промахи: {prediction_stats['miss']})"
+    msg = f"🎯 **ПРОГНОЗ**\n\n"
+    msg += f"Игра №{game_num}\n"
+    msg += f"Значение: {symbol}\n"
+    msg += f"Целевая игра: №{target}\n"
+    msg += f"Догон: {dogen}x\n\n"
+    msg += f"📊 Статистика: {prediction_stats['wins']}/{prediction_stats['total']} ({(prediction_stats['wins']/prediction_stats['total']*100) if prediction_stats['total'] > 0 else 0:.1f}%)"
     
     try:
-        sent = bot.send_message(PREDICTION_CHANNEL_ID, msg, parse_mode="Markdown")
-        current_predictions["message_id"] = sent.message_id
-        current_predictions["player"] = player_pred["value"]
-        current_predictions["dealer"] = dealer_pred["value"]
-        print(f"📤 Прогноз: Игрок={player_pred['symbol']}, Дилер={dealer_pred['symbol']}")
+        if current_prediction["message_id"] is None:
+            sent = bot.send_message(PREDICTION_CHANNEL_ID, msg, parse_mode="Markdown")
+            current_prediction["message_id"] = sent.message_id
+            print(f"📤 Создан прогноз для игры #{game_num}, ID={sent.message_id}")
+        else:
+            bot.edit_message_text(
+                chat_id=PREDICTION_CHANNEL_ID,
+                message_id=current_prediction["message_id"],
+                text=msg,
+                parse_mode="Markdown"
+            )
     except Exception as e:
         print(f"❌ Ошибка отправки прогноза: {e}")
+        current_prediction["message_id"] = None
 
-def check_prediction(game_data):
-    """Проверяет точность прогноза (только для старших карт)"""
-    global current_predictions, prediction_stats
+def check_prediction_for_game(game_num, player_values, dealer_values):
+    """Проверяет, есть ли прогнозируемое значение в игре"""
+    if not current_prediction.get("predicted_value") or current_prediction["is_checked"]:
+        return False
     
-    if not current_predictions.get("player") or not current_predictions.get("dealer"):
+    predicted = current_prediction["predicted_value"]
+    
+    # Проверяем все карты в игре (и Игрока, и Дилера)
+    all_values = player_values + dealer_values
+    
+    for val in all_values:
+        # Туз может быть 1 или 14
+        if predicted == 1 and val in [1, 14]:
+            return True
+        if val == predicted:
+            return True
+    
+    return False
+
+def finalize_prediction(result):
+    """Завершает прогноз с результатом ✅ или ❌"""
+    if not current_prediction.get("message_id"):
         return
     
-    player_values = game_data.get("player_values", [])
-    dealer_values = game_data.get("dealer_values", [])
+    game_num = current_prediction["game_num"]
+    symbol = current_prediction["predicted_symbol"]
+    dogen = current_prediction["dogen_level"]
     
-    if not player_values or not dealer_values:
-        return
+    emoji = "✅" if result else "❌"
     
-    # Берем первую карту каждого
-    actual_player = player_values[0]
-    actual_dealer = dealer_values[0]
+    msg = f"🎯 **ПРОГНОЗ** {emoji}\n\n"
+    msg += f"Игра №{game_num}\n"
+    msg += f"Значение: {symbol}\n"
+    msg += f"Догон: {dogen}x\n"
+    msg += f"Результат: {'Успешный' if result else 'Неуспешный'}\n\n"
     
-    pred_player = current_predictions["player"]
-    pred_dealer = current_predictions["dealer"]
-    
-    def check_accuracy(pred, actual):
-        if pred == actual:
-            return "exact"
-        elif abs(pred - actual) <= 1:
-            return "plus_minus_1"
-        elif abs(pred - actual) <= 2:
-            return "plus_minus_2"
-        else:
-            return "miss"
-    
-    player_result = check_accuracy(pred_player, actual_player)
-    dealer_result = check_accuracy(pred_dealer, actual_dealer)
-    
-    prediction_stats["total"] += 2
-    for result in [player_result, dealer_result]:
-        prediction_stats[result] += 1
-    
-    msg = f"📋 **ПРОВЕРКА ПРОГНОЗА**\n\n"
-    
-    msg += f"👤 **Игрок**:\n"
-    msg += f"Прогноз: {FACE_CARDS.get(pred_player, pred_player)}\n"
-    msg += f"Факт: {get_card_symbol(actual_player, 0)[:-2]} (значение: {actual_player})\n"
-    result_emoji = {"exact": "✅", "plus_minus_1": "🟡", "plus_minus_2": "🟠", "miss": "❌"}
-    msg += f"Результат: {result_emoji[player_result]}\n\n"
-    
-    msg += f"🤖 **Дилер**:\n"
-    msg += f"Прогноз: {FACE_CARDS.get(pred_dealer, pred_dealer)}\n"
-    msg += f"Факт: {get_card_symbol(actual_dealer, 0)[:-2]} (значение: {actual_dealer})\n"
-    msg += f"Результат: {result_emoji[dealer_result]}\n\n"
-    
-    accuracy = ((prediction_stats["exact"] + prediction_stats["plus_minus_1"] + prediction_stats["plus_minus_2"]) / prediction_stats["total"] * 100) if prediction_stats["total"] > 0 else 0
-    msg += f" **Общая точность**: {accuracy:.1f}%\n"
-    msg += f"Точных: {prediction_stats['exact']} | ±1: {prediction_stats['plus_minus_1']} | ±2: {prediction_stats['plus_minus_2']} | Промахи: {prediction_stats['miss']}"
+    prediction_stats["total"] += 1
+    if result:
+        prediction_stats["wins"] += 1
+        current_prediction["dogen_level"] = 1  # Сброс догона
+        msg += f"🔄 Догон сброшен на 1x"
+    else:
+        prediction_stats["losses"] += 1
+        current_prediction["dogen_level"] *= 2  # Увеличение догона
+        msg += f"⚠️ Догон увеличен до {current_prediction['dogen_level']}x"
     
     try:
-        bot.send_message(PREDICTION_CHANNEL_ID, msg, parse_mode="Markdown")
-        print(f"✅ Проверка: Игрок={player_result}, Дилер={dealer_result}")
+        bot.edit_message_text(
+            chat_id=PREDICTION_CHANNEL_ID,
+            message_id=current_prediction["message_id"],
+            text=msg,
+            parse_mode="Markdown"
+        )
+        print(f"{'✅' if result else '❌'} Прогноз для игры #{game_num} {'успешный' if result else 'неуспешный'}")
     except Exception as e:
-        print(f"❌ Ошибка отправки проверки: {e}")
+        print(f"❌ Ошибка редактирования: {e}")
     
-    current_predictions["player"] = None
-    current_predictions["dealer"] = None
-    current_predictions["message_id"] = None
+    current_prediction["is_checked"] = True
+    current_prediction["message_id"] = None  # Сброс для следующего прогноза
 
-def send_or_edit_message(slot_index, msg, is_finished):
-    global slots
-    slot = slots[slot_index]
-    
-    try:
-        if slot["message_id"] is None:
-            sent = bot.send_message(CHANNEL_ID, msg, parse_mode=None)
-            slots[slot_index]["message_id"] = sent.message_id
-        else:
-            bot.edit_message_text(chat_id=CHANNEL_ID, message_id=slot["message_id"], text=msg, parse_mode=None)
-        
-        if is_finished:
-            slots[slot_index]["is_finished"] = True
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        slots[slot_index]["message_id"] = None
-
-def find_or_allocate_slot(game_id):
-    for i, slot in enumerate(slots):
-        if slot["game_id"] == game_id:
-            return i
-    
-    for i, slot in enumerate(slots):
-        if slot["game_id"] is None:
-            return i
-    
-    for i, slot in enumerate(slots):
-        if slot.get("is_finished", False):
-            slots[i] = {"game_id": None, "game_num": None, "message_id": None, "last_state": ""}
-            return i
-    
-    return 0
-
-def get_active_games(session):
+def get_active_games_info(session):
     try:
         resp = session.get(VIRTUAL_URL, headers=HEADERS, timeout=10)
         data = resp.json()
         games = data.get("games", [])
-        return games if isinstance(games, list) else []
+        result = []
+        for g in games:
+            result.append({
+                "id": g.get("id"),
+                "num": g.get("num"),
+                "is_finished": g.get("scores", {}).get("currentPeriodName") == "Игра завершена"
+            })
+        return result
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка получения списка игр: {e}")
         return []
 
 def main():
-    global game_history, current_predictions
-    print(" Трансляция + ПРОГНОЗЫ (J, Q, K, A) запущены...")
+    global active_games, game_history, current_prediction
+    print(" Запуск: трансляция + стратегия прогнозов...")
     session = requests.Session()
-    
-    last_prediction_time = 0
     
     while True:
         try:
-            games = get_active_games(session)
-            
-            if not games:
+            games_info = get_active_games_info(session)
+            if not games_info:
                 time.sleep(3)
                 continue
             
-            current_time = time.time()
-            if current_time - last_prediction_time > 30:
-                send_prediction()
-                last_prediction_time = current_time
+            current_game_ids = set(g["id"] for g in games_info)
             
-            active_game_ids = set()
-            
-            for game_data in games[:MAX_SLOTS]:
-                game_id = game_data.get("id")
-                if not game_id:
-                    continue
+            for g_info in games_info:
+                game_id = g_info["id"]
+                game_num = g_info["num"]
                 
-                active_game_ids.add(game_id)
+                if game_id not in active_games:
+                    active_games[game_id] = {
+                        "message_id": None,
+                        "game_num": game_num,
+                        "last_state": "",
+                        "is_finished": False
+                    }
+                
+                slot = active_games[game_id]
                 
                 stat_url = STATISTIC_URL_TEMPLATE.format(game_id=game_id)
-                try:
-                    resp = session.get(stat_url, headers=HEADERS, timeout=5)
-                    if resp.status_code == 204:
-                        continue
-                    
-                    data = resp.json()
-                    score_detail = data.get("fullScoreDetail", {})
-                    p1_score = score_detail.get("scoreOpp1", 0)
-                    p2_score = score_detail.get("scoreOpp2", 0)
-                    total_points = p1_score + p2_score
-                    status = data.get("currentPeriodName", "")
-                    
-                    stat = data.get("statistic", {}).get("main", {})
-                    p1_cards, p1_values = parse_cards_detail(stat.get("P1", "[]"))
-                    p2_cards, p2_values = parse_cards_detail(stat.get("P2", "[]"))
-                    
-                    is_finished = (status == "Игра завершена")
-                    
-                    if is_finished and not any(g["id"] == game_id for g in game_history):
-                        game_record = {
-                            "id": game_id,
-                            "player_values": p1_values,
-                            "dealer_values": p2_values,
-                            "timestamp": datetime.datetime.now()
-                        }
-                        game_history.append(game_record)
-                        
-                        if len(game_history) > MAX_HISTORY:
-                            game_history = game_history[-MAX_HISTORY:]
-                        
-                        check_prediction(game_record)
-                        print(f"📝 Добавлена игра #{len(game_history)}")
-                    
-                    slot_index = find_or_allocate_slot(game_id)
-                    slot = slots[slot_index]
-                    
-                    if slot["game_id"] is None:
-                        game_num = get_utc_game_number()
-                        slots[slot_index]["game_id"] = game_id
-                        slots[slot_index]["game_num"] = game_num
-                        slots[slot_index]["is_finished"] = False
-                    
-                    current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
-                    
-                    if current_state != slot["last_state"] and (p1_cards or p2_cards):
-                        cards_p1 = " ".join(p1_cards) if p1_cards else "?"
-                        cards_p2 = " ".join(p2_cards) if p2_cards else "?"
-                        
-                        if not is_finished:
-                            if p1_score < 17:
-                                arrow = "◀️"
-                            elif p2_score < 17:
-                                arrow = "▶️"
-                            else:
-                                arrow = ""
-                            msg = f" #N{slot['game_num']}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
-                        else:
-                            p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
-                            p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
-                            draw = (p1_score == p2_score) or (p1_score > 21 and p2_score > 21)
-                            
-                            res_p1 = "✅" if p1_win else ("🔰" if draw else "")
-                            res_p2 = "✅" if p2_win else ("🔰" if draw else "")
-                            
-                            tags = []
-                            if p1_score == 21 or p2_score == 21:
-                                tags.append("#O🔵")
-                            
-                            is_p1_golden = (len(p1_values) == 2 and all(v in (1, 14) for v in p1_values))
-                            is_p2_golden = (len(p2_values) == 2 and all(v in (1, 14) for v in p2_values))
-                            if is_p1_golden or is_p2_golden:
-                                tags.append("#G🔴")
-                            
-                            if len(p1_cards) == 2 and len(p2_cards) == 2:
-                                tags.append("#R")
-                            
-                            tags_str = " ".join(tags)
-                            msg = f"#N{slot['game_num']}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points} {tags_str}".strip()
-                        
-                        send_or_edit_message(slot_index, msg, is_finished)
-                        slots[slot_index]["last_state"] = current_state
-                        
-                        if is_finished:
-                            time.sleep(1)
+                resp = session.get(stat_url, headers=HEADERS, timeout=5)
+                if resp.status_code == 204 or not resp.text.strip():
+                    continue
                 
-                except Exception as e:
-                    print(f"❌ Ошибка: {e}")
+                data = resp.json()
+                score_detail = data.get("fullScoreDetail", {})
+                p1_score = score_detail.get("scoreOpp1", 0)
+                p2_score = score_detail.get("scoreOpp2", 0)
+                total_points = p1_score + p2_score
+                status = data.get("currentPeriodName", "")
+                
+                stat = data.get("statistic", {}).get("main", {})
+                p1_cards, p1_values = parse_cards_detail(stat.get("P1", "[]"))
+                p2_cards, p2_values = parse_cards_detail(stat.get("P2", "[]"))
+                
+                is_finished = (status == "Игра завершена")
+                
+                # Сохраняем в историю при завершении
+                if is_finished and game_num not in game_history:
+                    first_card = p1_values[0] if p1_values else None
+                    
+                    game_history[game_num] = {
+                        "player_first_card": first_card,
+                        "player_values": p1_values,
+                        "dealer_values": p2_values
+                    }
+                    
+                    # Ограничиваем историю
+                    if len(game_history) > MAX_HISTORY_GAMES:
+                        oldest = min(game_history.keys())
+                        del game_history[oldest]
+                    
+                    print(f"📝 Игра #{game_num} добавлена в историю, первая карта Игрока: {first_card}")
+                    
+                    # Проверяем текущий прогноз
+                    if current_prediction.get("target_game_num") and not current_prediction["is_checked"]:
+                        target = current_prediction["target_game_num"]
+                        # Проверяем диапазон: target-2, target-1, target
+                        check_range = [target - 2, target - 1, target]
+                        
+                        if game_num in check_range:
+                            has_value = check_prediction_for_game(game_num, p1_values, p2_values)
+                            
+                            # Если нашли значение или это последняя игра диапазона
+                            if has_value or game_num == target:
+                                finalize_prediction(has_value)
+                    
+                    # Создаем новый прогноз на основе этой игры
+                    if first_card and not current_prediction.get("is_checked"):
+                        pred_value, pred_symbol = get_prediction_for_card(first_card)
+                        target_game = game_num + 3
+                        
+                        current_prediction = {
+                            "message_id": None,
+                            "game_num": game_num,
+                            "predicted_value": pred_value,
+                            "predicted_symbol": pred_symbol,
+                            "target_game_num": target_game,
+                            "dogen_level": current_prediction.get("dogen_level", 1),
+                            "is_checked": False
+                        }
+                        
+                        print(f"🎯 Новый прогноз: Игра #{game_num}, первая карта {first_card} → {pred_symbol}, целевая #{target_game}")
+                        send_or_update_prediction()
+                
+                current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
+                
+                if current_state != slot["last_state"] and (p1_cards or p2_cards):
+                    cards_p1 = " ".join(p1_cards) if p1_cards else "?"
+                    cards_p2 = " ".join(p2_cards) if p2_cards else "?"
+                    
+                    if not is_finished:
+                        arrow = "◀️" if p1_score < 17 else ("▶️" if p2_score < 17 else "")
+                        msg = f"🕒 #N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
+                    else:
+                        p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
+                        p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
+                        draw = (p1_score == p2_score) or (p1_score > 21 and p2_score > 21)
+                        
+                        res_p1 = "✅" if p1_win else ("🔰" if draw else "")
+                        res_p2 = "✅" if p2_win else ("🔰" if draw else "")
+                        
+                        tags = []
+                        if p1_score == 21 or p2_score == 21: tags.append("#O🔵")
+                        if (len(p1_values) == 2 and all(v in (1, 14) for v in p1_values)) or (len(p2_values) == 2 and all(v in (1, 14) for v in p2_values)):
+                            tags.append("#G🔴")
+                        if len(p1_cards) == 2 and len(p2_cards) == 2:
+                            tags.append("#R🟢")
+                        
+                        msg = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points} {' '.join(tags)}".strip()
+                    
+                    try:
+                        if slot["message_id"] is None:
+                            sent = bot.send_message(CHANNEL_ID, msg)
+                            slot["message_id"] = sent.message_id
+                        else:
+                            bot.edit_message_text(chat_id=CHANNEL_ID, message_id=slot["message_id"], text=msg)
+                    except Exception as e:
+                        print(f"⚠️ Ошибка Telegram: {e}")
+                    
+                    slot["last_state"] = current_state
+                    if is_finished:
+                        slot["is_finished"] = True
             
-            for i, slot in enumerate(slots):
-                if slot["game_id"] and slot["game_id"] not in active_game_ids and slot.get("is_finished", False):
-                    slots[i] = {"game_id": None, "game_num": None, "message_id": None, "last_state": ""}
-            
+            # Очистка завершенных игр
+            finished_to_remove = [
+                gid for gid, data in active_games.items() 
+                if data["is_finished"] and gid not in current_game_ids
+            ]
+            for gid in finished_to_remove:
+                del active_games[gid]
+                
             time.sleep(3)
             
         except Exception as e:
