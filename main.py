@@ -6,7 +6,10 @@ import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-VIRTUAL_URL = os.getenv("VIRTUAL_URL", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/leftmenu/virtual?champIds=1643503&country=192&fcountry=192&gr=1521&lng=ru&ref=8&sportIds=146")
+
+# НОВЫЙ, более надежный URL для получения списка игр
+VIRTUAL_URL = os.getenv("VIRTUAL_URL", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/gamesByChamp?cfView=3&champId=1643503&country=192&fcountry=192&gr=1521&lng=ru&ref=8")
+
 STATISTIC_URL_TEMPLATE = os.getenv("STATISTIC_URL_TEMPLATE", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gameId={game_id}&gr=1521&lng=ru&ref=8")
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -36,31 +39,19 @@ def parse_cards_detail(cards_str):
         return []
 
 def get_active_game_id(session):
-    """Универсальный поиск ID активной игры в любом формате JSON"""
+    """Находит ID текущей игры из списка gamesByChamp"""
     try:
         resp = session.get(VIRTUAL_URL, headers=HEADERS, timeout=10)
         data = resp.json()
         
-        # 1. Если ответ - это сразу список игр
-        if isinstance(data, list):
-            games_list = data
-        # 2. Если ответ - словарь, ищем знакомые ключи
-        elif isinstance(data, dict):
-            games_list = data.get("games", data.get("events", data.get("data", [])))
-            if isinstance(games_list, dict):
-                games_list = list(games_list.values())
-        else:
-            print(f"⚠️ Неожиданный формат: {type(data)}")
+        games = data.get("games", [])
+        if not isinstance(games, list) or not games:
             return None
-
-        # Ищем игру, которая УЖЕ идет (nonStarted == False)
-        for game in games_list:
-            if isinstance(game, dict) and not game.get("nonStarted", True):
-                return game.get("id")
-        
-        # Если все игры еще не начались, берем последнюю в списке (следующую)
-        if games_list and isinstance(games_list[-1], dict):
-            return games_list[-1].get("id")
+            
+        # Берем первую игру в списке (она всегда текущая или ближайшая)
+        first_game = games[0]
+        if isinstance(first_game, dict) and "id" in first_game:
+            return first_game["id"]
             
         return None
     except Exception as e:
@@ -84,7 +75,7 @@ def main():
             if active_id != current_game_id:
                 current_game_id = active_id
                 last_update_state = ""
-                print(f"🔄 Найдена новая игра! ID: {active_id}")
+                print(f"🔄 Переключился на новую игру! ID: {active_id}")
 
             stat_url = STATISTIC_URL_TEMPLATE.format(game_id=active_id)
             resp = session.get(stat_url, headers=HEADERS, timeout=10)
