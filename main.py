@@ -4,9 +4,15 @@ import json
 import telebot
 import os
 
+# --- НАСТРОЙКИ (задаются в Railway Variables) ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-API_URL = os.getenv("API_URL", "   https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gameId=739799539&gr=1521&lng=ru&ref=8")
+
+# URL для получения списка текущих игр
+VIRTUAL_URL = os.getenv("VIRTUAL_URL", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/leftmenu/virtual?champIds=1643503&country=192&fcountry=192&gr=1521&lng=ru&ref=8&sportIds=146")
+
+# Шаблон URL для статистики (сюда будет подставляться gameId)
+STATISTIC_URL_TEMPLATE = os.getenv("STATISTIC_URL_TEMPLATE", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gameId={game_id}&gr=1521&lng=ru&ref=8")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -19,7 +25,8 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-current_game = {"num": 0, "last_update": ""}
+current_game_id = None
+last_update_state = ""
 
 def get_card_symbol(card_value, suit_code):
     suits = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
@@ -33,69 +40,102 @@ def parse_cards_detail(cards_str):
     except Exception:
         return []
 
+def get_active_game_id(session):
+    """Находит ID текущей активной игры из списка"""
+    try:
+        resp = session.get(VIRTUAL_URL, headers=HEADERS, timeout=10)
+        data = resp.json()
+        
+        # Melbet обычно возвращает список игр в ключе "games" или "events"
+        games = data.get("games", data.get("events", []))
+        if isinstance(games, dict): # Иногда бывает вложенный словарь
+            games = list(games.values())
+            
+        for game in games:
+            # Ищем игру, которая уже началась (nonStarted == False)
+            if not game.get("nonStarted", True):
+                return game.get("id")
+        
+        # Если все игры еще не начались, берем самую последнюю в списке (следующую)
+        if games:
+            return games[-1].get("id")
+        return None
+    except Exception as e:
+        print(f"❌ Ошибка получения списка игр: {e}")
+        return None
+
 def main():
-    global current_game
-    print("🎮 Запуск трансляции...")
+    global current_game_id, last_update_state
+    print("🎮 Автоматическая трансляция запущена...")
     session = requests.Session()
-    loop_count = 0
     
     while True:
-        loop_count += 1
         try:
-            # print(f"🔄 Попытка #{loop_count}...") # Раскомментируйте, если хотите видеть каждый запрос
+            # 1. Находим актуальный ID игры
+            active_id = get_active_game_id(session)
             
-            resp = session.get(API_URL, headers=HEADERS, timeout=10)
+            if not active_id:
+                print("⏳ Активных игр не найдено, жду...")
+                time.sleep(5)
+                continue
+                
+            # 2. Если игра сменилась, сбрасываем состояние
+            if active_id != current_game_id:
+                current_game_id = active_id
+                last_update_state = ""
+                print(f"🔄 Найдена новая игра! ID: {active_id}")
+
+            # 3. Получаем статистику по этому ID
+            stat_url = STATISTIC_URL_TEMPLATE.format(game_id=active_id)
+            resp = session.get(stat_url, headers=HEADERS, timeout=10)
             
-            if "application/json" not in resp.headers.get("Content-Type", ""):
-                print(f"⚠️ БЛОКИРОВКА! Статус: {resp.status_code}")
-                print(f"Ответ: {resp.text[:200]}")
-                time.sleep(10)
+            if resp.status_code == 204 or not resp.text.strip():
+                print("⏳ Игра архивирована или еще не началась, жду...")
+                time.sleep(3)
                 continue
 
             data = resp.json()
-            game_num = data.get("num", 0)
-            status = data.get("currentPeriodName", "Неизвестно")
+            game_num = data.get("num", "?")
+            status = data.get("currentPeriodName", "")
             score_detail = data.get("fullScoreDetail", {})
             p1_score = score_detail.get("scoreOpp1", 0)
             p2_score = score_detail.get("scoreOpp2", 0)
+            timer_sec = data.get("timer", {}).get("timeSec", 0)
             
             stat = data.get("statistic", {}).get("main", {})
             p1_cards = parse_cards_detail(stat.get("P1", "[]"))
             p2_cards = parse_cards_detail(stat.get("P2", "[]"))
             
-            # ДИАГНОСТИКА: Печатаем состояние каждые 10 циклов или при изменении
-            if loop_count % 10 == 0 or game_num != current_game["num"]:
-                print(f"📡 Игра #{game_num} | Статус: {status} | Счет: {p1_score}-{p2_score} | Карты: {p1_cards} vs {p2_cards}")
-
             is_finished = (status == "Игра завершена")
-            current_state = f"{game_num}_{p1_score}_{p2_score}_{'_'.join(p1_cards)}"
+            current_state = f"{game_num}_{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
             
-            if game_num != current_game["num"] or current_state != current_game["last_update"]:
-                if p1_cards or p2_cards: # Отправляем только когда появились карты
-                    cards_p1 = " ".join(p1_cards) if p1_cards else "?"
-                    cards_p2 = " ".join(p2_cards) if p2_cards else "?"
-                    arrow = "👈" if not is_finished else ""
-                    result = "✅ #O🔵" if is_finished else "🕒"
-                    
-                    msg = f"{result} #N{game_num}. {p1_score}({cards_p1}){arrow} {p2_score}({cards_p2})"
-                    bot.send_message(CHANNEL_ID, msg)
-                    print(f"✅ ОТПРАВЛЕНО В TELEGRAM: {msg}")
+            # 4. Отправляем сообщение, только если состояние изменилось
+            if current_state != last_update_state and (p1_cards or p2_cards):
+                cards_p1 = " ".join(p1_cards) if p1_cards else "?"
+                cards_p2 = " ".join(p2_cards) if p2_cards else "?"
                 
-                current_game = {"num": game_num, "last_update": current_state}
+                if is_finished:
+                    msg = f"✅ #N{game_num}. {p1_score}({cards_p1}) - {p2_score}({cards_p2}) #T{timer_sec} #O🔵"
+                else:
+                    msg = f"🕒 #N{game_num}. {p1_score}({cards_p1}) 👈 {p2_score}({cards_p2}) #T{timer_sec}"
+                
+                bot.send_message(CHANNEL_ID, msg)
+                print(f"✅ Отправлено: {msg}")
+                
+                last_update_state = current_state
+                
+                # Если игра завершена, делаем паузу перед поиском следующей
+                if is_finished:
+                    print("🏁 Игра завершена, ожидаю следующую...")
+                    time.sleep(5)
             
-            time.sleep(3)
+            time.sleep(2) # Опрос каждые 2 секунды для максимального лайва
             
         except requests.exceptions.Timeout:
-            print("❌ Таймаут запроса (сервер не отвечает)")
-            time.sleep(5)
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Ошибка сети: {e}")
-            time.sleep(5)
-        except json.JSONDecodeError as e:
-            print(f"❌ Ошибка JSON: {e}")
+            print("❌ Таймаут запроса")
             time.sleep(5)
         except Exception as e:
-            print(f"❌ Неизвестная ошибка: {e}")
+            print(f"❌ Ошибка: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
