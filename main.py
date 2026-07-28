@@ -46,10 +46,10 @@ current_prediction = {
 prediction_stats = {"total": 0, "wins": 0, "losses": 0}
 
 
-# --- ВПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ВРЕМЕНИ И НОМЕРОВ ---
+# --- ФУНКЦИИ ТОЧНОЙ НУМЕРАЦИИ И ВРЕМЕНИ ---
 
 def normalize_game_num(num):
-    """Корректирует номер игры при переходе через 00:00 (1440 минут в сутках)"""
+    """Корректирует номер игры при переходе через 00:00 UTC (1..1440)"""
     if num > 1440:
         return num - 1440
     if num < 1:
@@ -57,7 +57,7 @@ def normalize_game_num(num):
     return num
 
 def get_utc_game_number(timestamp=None):
-    """Рассчитывает номер игры по UTC (1..1440) на основе timestamp или текущего времени"""
+    """Рассчитывает номер минуты в сутках (1..1440) по времени UTC"""
     if timestamp:
         dt = datetime.datetime.fromtimestamp(timestamp, tz=timezone.utc)
     else:
@@ -65,19 +65,28 @@ def get_utc_game_number(timestamp=None):
     return (dt.hour * 60) + dt.minute + 1
 
 def extract_game_number(game_data):
-    """Извлекает номер игры из API или рассчитывает его по времени старта события"""
-    # 1. Если номер явно передан в объекте API
-    if "num" in game_data and isinstance(game_data["num"], int):
-        return game_data["num"]
-    if "N" in game_data and isinstance(game_data["N"], int):
-        return game_data["N"]
+    """
+    Извлекает суточный номер игры (#N883 и т.д.) из API Мелбета, 
+    фильтруя системные уникальные ID вроде 258081.
+    """
+    # 1. Попытка взять явный короткий номер из полей API
+    for key in ["num", "N", "I", "gameNum", "number"]:
+        val = game_data.get(key)
+        if val is not None:
+            try:
+                num_int = int(val)
+                # Порядковый номер игры в сутках строго в диапазоне 1..1440
+                if 1 <= num_int <= 1440:
+                    return num_int
+            except ValueError:
+                pass
 
-    # 2. Расчет по официальному времени начала матча (S / startDate)
-    start_time = game_data.get("S") or game_data.get("startDate")
+    # 2. Если поле num отсутствует/содержит системный ID — считаем номер по времени старта матча (S / startDate)
+    start_time = game_data.get("S") or game_data.get("startDate") or game_data.get("S_T")
     if start_time:
         return get_utc_game_number(start_time)
 
-    # 3. Фолбэк на текущее UTC время
+    # 3. Фолбэк на текущее время UTC
     return get_utc_game_number()
 
 
@@ -241,7 +250,7 @@ def get_active_games_info(session):
 
 def main():
     global active_games, game_history, current_prediction
-    print("🚀 Запуск: трансляция + стратегия прогнозов (номера по точной сетке UTC)...")
+    print("🚀 Запуск: трансляция + стратегия прогнозов (номера по суточной сетке UTC)...")
     session = requests.Session()
     
     while True:
@@ -254,10 +263,10 @@ def main():
             current_game_ids = set(g["id"] for g in games_info)
             
             for g_info in games_info:
-                game_id = g_info["id"]
+                game_id = g_info["id"]  # Используем глобальный ID для работы словаря
                 
                 if game_id not in active_games:
-                    # Извлекаем точный номер игры из данных API
+                    # Извлекаем красивый суточный номер (1..1440) для вывода в Telegram
                     game_num = extract_game_number(g_info["raw_data"])
                     active_games[game_id] = {
                         "message_id": None,
@@ -265,7 +274,7 @@ def main():
                         "last_state": "",
                         "is_finished": False
                     }
-                    print(f"🆕 Начата игра #{game_num} (ID: {game_id})")
+                    print(f"🆕 Начата игра #{game_num} (Системный ID: {game_id})")
                 
                 slot = active_games[game_id]
                 game_num = slot["game_num"]
@@ -308,7 +317,7 @@ def main():
                     if current_prediction.get("target_game_num") and not current_prediction["is_checked"]:
                         target = current_prediction["target_game_num"]
                         
-                        # Диапазон проверки (целевая игра и 2 игры до нее) с учетом 00:00
+                        # Диапазон проверки (целевая игра и 2 игры до нее) с учетом смены суток
                         check_range = [
                             normalize_game_num(target - 2),
                             normalize_game_num(target - 1),
