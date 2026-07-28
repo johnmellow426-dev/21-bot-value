@@ -1,16 +1,24 @@
-import requests
+import os
 import time
 import json
-import telebot
-import os
 import datetime
+from datetime import timezone
+import requests
+import telebot
 
+# --- НАСТРОЙКИ ОКРУЖЕНИЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 PREDICTION_CHANNEL_ID = os.getenv("PREDICTION_CHANNEL_ID")
 
-VIRTUAL_URL = os.getenv("VIRTUAL_URL", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/gamesByChamp?cfView=3&champId=1643503&country=192&fcountry=192&gr=1521&lng=ru&ref=8")
-STATISTIC_URL_TEMPLATE = os.getenv("STATISTIC_URL_TEMPLATE", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gameId={game_id}&gr=1521&lng=ru&ref=8")
+VIRTUAL_URL = os.getenv(
+    "VIRTUAL_URL",
+    "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/gamesByChamp?cfView=3&champId=1643503&country=192&fcountry=192&gr=1521&lng=ru&ref=8"
+)
+STATISTIC_URL_TEMPLATE = os.getenv(
+    "STATISTIC_URL_TEMPLATE",
+    "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gameId={game_id}&gr=1521&lng=ru&ref=8"
+)
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
@@ -20,13 +28,10 @@ HEADERS = {
     "Referer": "https://melbet-8093.pro/",
 }
 
-# Хранилище активных игр
+# --- ХРАНИЛИЩА ДАННЫХ ---
 active_games = {}
-
-# История завершенных игр
 game_history = {}
 
-# Текущий активный прогноз
 current_prediction = {
     "message_id": None,
     "trigger_game_num": None,
@@ -38,16 +43,48 @@ current_prediction = {
     "checked_games": []
 }
 
-# Статистика прогнозов
 prediction_stats = {"total": 0, "wins": 0, "losses": 0}
 
-def get_utc_game_number():
-    """Рассчитывает номер игры по времени UTC+0: 00:00=1, 23:59=1440"""
-    now = datetime.datetime.utcnow()
-    return (now.hour * 60) + now.minute + 1
+
+# --- ВПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ВРЕМЕНИ И НОМЕРОВ ---
+
+def normalize_game_num(num):
+    """Корректирует номер игры при переходе через 00:00 (1440 минут в сутках)"""
+    if num > 1440:
+        return num - 1440
+    if num < 1:
+        return num + 1440
+    return num
+
+def get_utc_game_number(timestamp=None):
+    """Рассчитывает номер игры по UTC (1..1440) на основе timestamp или текущего времени"""
+    if timestamp:
+        dt = datetime.datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    else:
+        dt = datetime.datetime.now(timezone.utc)
+    return (dt.hour * 60) + dt.minute + 1
+
+def extract_game_number(game_data):
+    """Извлекает номер игры из API или рассчитывает его по времени старта события"""
+    # 1. Если номер явно передан в объекте API
+    if "num" in game_data and isinstance(game_data["num"], int):
+        return game_data["num"]
+    if "N" in game_data and isinstance(game_data["N"], int):
+        return game_data["N"]
+
+    # 2. Расчет по официальному времени начала матча (S / startDate)
+    start_time = game_data.get("S") or game_data.get("startDate")
+    if start_time:
+        return get_utc_game_number(start_time)
+
+    # 3. Фолбэк на текущее UTC время
+    return get_utc_game_number()
+
+
+# --- КАРТЫ И ЛОГИКА ---
 
 def get_card_symbol(card_value, suit_code):
-    suits = {0: "♠️", 1: "️", 2: "♦️", 3: "♥️"}
+    suits = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
     values = {1: "A", 14: "A", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "J", 12: "Q", 13: "K"}
     return f"{values.get(card_value, '?')}{suits.get(suit_code, '?')}"
 
@@ -60,7 +97,7 @@ def parse_cards_detail(cards_str):
             symbols.append(get_card_symbol(cv, cs))
             values.append(cv)
         return symbols, values
-    except:
+    except Exception:
         return [], []
 
 def get_prediction_for_card(card_value):
@@ -73,6 +110,9 @@ def get_prediction_for_card(card_value):
         return 11, "J (Валет)"
     else:
         return 1, "A (Туз)"
+
+
+# --- РАБОТА С ПРОГНОЗАМИ В TELEGRAM ---
 
 def send_or_update_prediction():
     """Отправляет или редактирует сообщение прогноза"""
@@ -87,18 +127,22 @@ def send_or_update_prediction():
     if current_prediction["is_checked"]:
         return
     
+    total = prediction_stats['total']
+    wins = prediction_stats['wins']
+    winrate = (wins / total * 100) if total > 0 else 0.0
+
     msg = f"🎯 **ПРОГНОЗ**\n\n"
     msg += f"Игра №{trigger}\n"
     msg += f"Значение: {symbol}\n"
     msg += f"Целевая игра: №{target}\n"
     msg += f"Догон: {dogen}x\n\n"
-    msg += f"📊 Статистика: {prediction_stats['wins']}/{prediction_stats['total']} ({(prediction_stats['wins']/prediction_stats['total']*100) if prediction_stats['total'] > 0 else 0:.1f}%)"
+    msg += f"📊 Статистика: {wins}/{total} ({winrate:.1f}%)"
     
     try:
         if current_prediction["message_id"] is None:
             sent = bot.send_message(PREDICTION_CHANNEL_ID, msg, parse_mode="Markdown")
             current_prediction["message_id"] = sent.message_id
-            print(f" Создан прогноз: триггер #{trigger} → целевая #{target}, значение {symbol}")
+            print(f"🎯 Создан прогноз: триггер #{trigger} → целевая #{target}, значение {symbol}")
         else:
             bot.edit_message_text(
                 chat_id=PREDICTION_CHANNEL_ID,
@@ -110,8 +154,8 @@ def send_or_update_prediction():
         print(f"❌ Ошибка отправки прогноза: {e}")
         current_prediction["message_id"] = None
 
-def check_prediction_for_game(game_num, player_values, dealer_values):
-    """Проверяет, есть ли прогнозируемое значение в игре"""
+def check_prediction_for_game(player_values, dealer_values):
+    """Проверяет, есть ли прогнозируемое значение в картах игры"""
     if not current_prediction.get("predicted_value") or current_prediction["is_checked"]:
         return False
     
@@ -147,7 +191,7 @@ def finalize_prediction(result):
     if result:
         prediction_stats["wins"] += 1
         current_prediction["dogen_level"] = 1
-        msg += f"🔄 Догон сброшен на 1x"
+        msg += "🔄 Догон сброшен на 1x"
     else:
         prediction_stats["losses"] += 1
         current_prediction["dogen_level"] *= 2
@@ -162,14 +206,17 @@ def finalize_prediction(result):
         )
         print(f"{'✅' if result else '❌'} Прогноз для игры #{trigger} {'успешный' if result else 'неуспешный'}")
     except Exception as e:
-        print(f"❌ Ошибка редактирования: {e}")
+        print(f"❌ Ошибка редактирования прогноза: {e}")
     
     current_prediction["is_checked"] = True
     current_prediction["message_id"] = None
     current_prediction["checked_games"] = []
 
+
+# --- СБОР ДАННЫХ ---
+
 def get_active_games_info(session):
-    """Получает список игр"""
+    """Получает активный список игр из API"""
     try:
         resp = session.get(VIRTUAL_URL, headers=HEADERS, timeout=10)
         data = resp.json()
@@ -180,7 +227,8 @@ def get_active_games_info(session):
             result.append({
                 "id": g.get("id"),
                 "index": idx,
-                "is_finished": g.get("scores", {}).get("currentPeriodName") == "Игра завершена"
+                "is_finished": g.get("scores", {}).get("currentPeriodName") == "Игра завершена",
+                "raw_data": g
             })
         
         return result
@@ -188,9 +236,12 @@ def get_active_games_info(session):
         print(f"❌ Ошибка получения списка игр: {e}")
         return []
 
+
+# --- ОСНОВНОЙ ЦИКЛ ---
+
 def main():
     global active_games, game_history, current_prediction
-    print("🚀 Запуск: трансляция + стратегия прогнозов (номера по UTC)...")
+    print("🚀 Запуск: трансляция + стратегия прогнозов (номера по точной сетке UTC)...")
     session = requests.Session()
     
     while True:
@@ -206,8 +257,8 @@ def main():
                 game_id = g_info["id"]
                 
                 if game_id not in active_games:
-                    # Рассчитываем номер игры по времени UTC в момент обнаружения
-                    game_num = get_utc_game_number()
+                    # Извлекаем точный номер игры из данных API
+                    game_num = extract_game_number(g_info["raw_data"])
                     active_games[game_id] = {
                         "message_id": None,
                         "game_num": game_num,
@@ -237,7 +288,7 @@ def main():
                 
                 is_finished = (status == "Игра завершена")
                 
-                # Сохраняем в историю при завершении
+                # --- ОБРАБОТКА ЗАВЕРШЕННОЙ ИГРЫ ---
                 if is_finished and game_num not in game_history:
                     first_card = p1_values[0] if p1_values else None
                     
@@ -247,20 +298,25 @@ def main():
                         "dealer_values": p2_values
                     }
                     
-                    # Ограничиваем историю
                     if len(game_history) > 50:
                         oldest = min(game_history.keys())
                         del game_history[oldest]
                     
                     print(f"📝 Игра #{game_num} добавлена в историю, первая карта: {first_card}")
                     
-                    # Проверяем текущий прогноз
+                    # Проверка активности текущего прогноза
                     if current_prediction.get("target_game_num") and not current_prediction["is_checked"]:
                         target = current_prediction["target_game_num"]
-                        check_range = [target - 2, target - 1, target]
+                        
+                        # Диапазон проверки (целевая игра и 2 игры до нее) с учетом 00:00
+                        check_range = [
+                            normalize_game_num(target - 2),
+                            normalize_game_num(target - 1),
+                            target
+                        ]
                         
                         if game_num in check_range:
-                            has_value = check_prediction_for_game(game_num, p1_values, p2_values)
+                            has_value = check_prediction_for_game(p1_values, p2_values)
                             current_prediction["checked_games"].append(game_num)
                             
                             print(f"🔍 Проверка игры #{game_num} (цель #{target}): {'найдено' if has_value else 'не найдено'}")
@@ -268,10 +324,10 @@ def main():
                             if has_value or game_num == target:
                                 finalize_prediction(has_value)
                     
-                    # Создаем новый прогноз на основе этой игры
+                    # Формирование нового прогноза
                     if first_card and not current_prediction.get("is_checked"):
                         pred_value, pred_symbol = get_prediction_for_card(first_card)
-                        target_num = game_num + 3
+                        target_num = normalize_game_num(game_num + 3)
                         
                         current_prediction = {
                             "message_id": None,
@@ -287,6 +343,7 @@ def main():
                         print(f"🎯 Новый прогноз: триггер #{game_num} → целевая #{target_num}, значение {pred_symbol}")
                         send_or_update_prediction()
                 
+                # --- ТРАНСЛЯЦИЯ В ТЕЛЕГРАМ-КАНАЛ ---
                 current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
                 
                 if current_state != slot["last_state"] and (p1_cards or p2_cards):
@@ -295,7 +352,7 @@ def main():
                     
                     if not is_finished:
                         arrow = "◀️" if p1_score < 17 else ("▶️" if p2_score < 17 else "")
-                        msg = f" #N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
+                        msg = f"#N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
                     else:
                         p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
                         p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
@@ -305,7 +362,8 @@ def main():
                         res_p2 = "✅" if p2_win else ("🔰" if draw else "")
                         
                         tags = []
-                        if p1_score == 21 or p2_score == 21: tags.append("#O🔵")
+                        if p1_score == 21 or p2_score == 21:
+                            tags.append("#O🔵")
                         if (len(p1_values) == 2 and all(v in (1, 14) for v in p1_values)) or (len(p2_values) == 2 and all(v in (1, 14) for v in p2_values)):
                             tags.append("#G🔴")
                         if len(p1_cards) == 2 and len(p2_cards) == 2:
@@ -320,13 +378,13 @@ def main():
                         else:
                             bot.edit_message_text(chat_id=CHANNEL_ID, message_id=slot["message_id"], text=msg)
                     except Exception as e:
-                        print(f"⚠️ Ошибка Telegram: {e}")
+                        print(f"⚠️ Ошибка отправки в Telegram: {e}")
                     
                     slot["last_state"] = current_state
                     if is_finished:
                         slot["is_finished"] = True
             
-            # Очистка завершенных игр
+            # Очистка завершенных игр из памяти
             finished_to_remove = [
                 gid for gid, data in active_games.items() 
                 if data["is_finished"] and gid not in current_game_ids
@@ -337,7 +395,7 @@ def main():
             time.sleep(3)
             
         except Exception as e:
-            print(f"❌ Критическая ошибка: {e}")
+            print(f"❌ Критическая ошибка цикла: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
