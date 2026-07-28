@@ -43,11 +43,11 @@ prediction_stats = {"total": 0, "wins": 0, "losses": 0}
 
 def get_utc_game_number():
     """Рассчитывает номер игры по времени UTC+0: 00:00=1, 23:59=1440"""
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.utcnow()
     return (now.hour * 60) + now.minute + 1
 
 def get_card_symbol(card_value, suit_code):
-    suits = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
+    suits = {0: "♠️", 1: "️", 2: "♦️", 3: "♥️"}
     values = {1: "A", 14: "A", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "J", 12: "Q", 13: "K"}
     return f"{values.get(card_value, '?')}{suits.get(suit_code, '?')}"
 
@@ -98,7 +98,7 @@ def send_or_update_prediction():
         if current_prediction["message_id"] is None:
             sent = bot.send_message(PREDICTION_CHANNEL_ID, msg, parse_mode="Markdown")
             current_prediction["message_id"] = sent.message_id
-            print(f"📤 Создан прогноз: триггер #{trigger} → целевая #{target}, значение {symbol}")
+            print(f" Создан прогноз: триггер #{trigger} → целевая #{target}, значение {symbol}")
         else:
             bot.edit_message_text(
                 chat_id=PREDICTION_CHANNEL_ID,
@@ -137,7 +137,7 @@ def finalize_prediction(result):
     
     emoji = "✅" if result else "❌"
     
-    msg = f" **ПРОГНОЗ** {emoji}\n\n"
+    msg = f"🎯 **ПРОГНОЗ** {emoji}\n\n"
     msg += f"Игра №{trigger}\n"
     msg += f"Значение: {symbol}\n"
     msg += f"Догон: {dogen}x\n"
@@ -151,7 +151,7 @@ def finalize_prediction(result):
     else:
         prediction_stats["losses"] += 1
         current_prediction["dogen_level"] *= 2
-        msg += f"️ Догон увеличен до {current_prediction['dogen_level']}x"
+        msg += f"⚠️ Догон увеличен до {current_prediction['dogen_level']}x"
     
     try:
         bot.edit_message_text(
@@ -263,7 +263,7 @@ def main():
                             has_value = check_prediction_for_game(game_num, p1_values, p2_values)
                             current_prediction["checked_games"].append(game_num)
                             
-                            print(f" Проверка игры #{game_num} (цель #{target}): {'найдено' if has_value else 'не найдено'}")
+                            print(f"🔍 Проверка игры #{game_num} (цель #{target}): {'найдено' if has_value else 'не найдено'}")
                             
                             if has_value or game_num == target:
                                 finalize_prediction(has_value)
@@ -295,7 +295,7 @@ def main():
                     
                     if not is_finished:
                         arrow = "◀️" if p1_score < 17 else ("▶️" if p2_score < 17 else "")
-                        msg = f"🕒 #N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
+                        msg = f" #N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
                     else:
                         p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
                         p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
