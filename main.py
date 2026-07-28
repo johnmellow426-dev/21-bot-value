@@ -4,14 +4,9 @@ import json
 import telebot
 import os
 
-# --- НАСТРОЙКИ (задаются в Railway Variables) ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-
-# URL для получения списка текущих игр
 VIRTUAL_URL = os.getenv("VIRTUAL_URL", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/leftmenu/virtual?champIds=1643503&country=192&fcountry=192&gr=1521&lng=ru&ref=8&sportIds=146")
-
-# Шаблон URL для статистики (сюда будет подставляться gameId)
 STATISTIC_URL_TEMPLATE = os.getenv("STATISTIC_URL_TEMPLATE", "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gameId={game_id}&gr=1521&lng=ru&ref=8")
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -41,27 +36,35 @@ def parse_cards_detail(cards_str):
         return []
 
 def get_active_game_id(session):
-    """Находит ID текущей активной игры из списка"""
+    """Универсальный поиск ID активной игры в любом формате JSON"""
     try:
         resp = session.get(VIRTUAL_URL, headers=HEADERS, timeout=10)
         data = resp.json()
         
-        # Melbet обычно возвращает список игр в ключе "games" или "events"
-        games = data.get("games", data.get("events", []))
-        if isinstance(games, dict): # Иногда бывает вложенный словарь
-            games = list(games.values())
-            
-        for game in games:
-            # Ищем игру, которая уже началась (nonStarted == False)
-            if not game.get("nonStarted", True):
+        # 1. Если ответ - это сразу список игр
+        if isinstance(data, list):
+            games_list = data
+        # 2. Если ответ - словарь, ищем знакомые ключи
+        elif isinstance(data, dict):
+            games_list = data.get("games", data.get("events", data.get("data", [])))
+            if isinstance(games_list, dict):
+                games_list = list(games_list.values())
+        else:
+            print(f"⚠️ Неожиданный формат: {type(data)}")
+            return None
+
+        # Ищем игру, которая УЖЕ идет (nonStarted == False)
+        for game in games_list:
+            if isinstance(game, dict) and not game.get("nonStarted", True):
                 return game.get("id")
         
-        # Если все игры еще не начались, берем самую последнюю в списке (следующую)
-        if games:
-            return games[-1].get("id")
+        # Если все игры еще не начались, берем последнюю в списке (следующую)
+        if games_list and isinstance(games_list[-1], dict):
+            return games_list[-1].get("id")
+            
         return None
     except Exception as e:
-        print(f"❌ Ошибка получения списка игр: {e}")
+        print(f"❌ Ошибка парсинга списка игр: {e}")
         return None
 
 def main():
@@ -71,7 +74,6 @@ def main():
     
     while True:
         try:
-            # 1. Находим актуальный ID игры
             active_id = get_active_game_id(session)
             
             if not active_id:
@@ -79,13 +81,11 @@ def main():
                 time.sleep(5)
                 continue
                 
-            # 2. Если игра сменилась, сбрасываем состояние
             if active_id != current_game_id:
                 current_game_id = active_id
                 last_update_state = ""
                 print(f"🔄 Найдена новая игра! ID: {active_id}")
 
-            # 3. Получаем статистику по этому ID
             stat_url = STATISTIC_URL_TEMPLATE.format(game_id=active_id)
             resp = session.get(stat_url, headers=HEADERS, timeout=10)
             
@@ -109,7 +109,6 @@ def main():
             is_finished = (status == "Игра завершена")
             current_state = f"{game_num}_{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
             
-            # 4. Отправляем сообщение, только если состояние изменилось
             if current_state != last_update_state and (p1_cards or p2_cards):
                 cards_p1 = " ".join(p1_cards) if p1_cards else "?"
                 cards_p2 = " ".join(p2_cards) if p2_cards else "?"
@@ -124,12 +123,11 @@ def main():
                 
                 last_update_state = current_state
                 
-                # Если игра завершена, делаем паузу перед поиском следующей
                 if is_finished:
                     print("🏁 Игра завершена, ожидаю следующую...")
                     time.sleep(5)
             
-            time.sleep(2) # Опрос каждые 2 секунды для максимального лайва
+            time.sleep(2)
             
         except requests.exceptions.Timeout:
             print("❌ Таймаут запроса")
