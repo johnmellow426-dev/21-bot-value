@@ -44,11 +44,15 @@ current_prediction = {
 }
 
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ НУМЕРАЦИИ ---
+# --- ВПОМОГАТЕЛЬНЫЕ ФУНКЦИИ НУМЕРАЦИИ ---
 
 def normalize_game_num(num):
     """Корректирует номер игры при переходе через 00:00 UTC (1..1440)"""
-    return ((num - 1) % 1440) + 1
+    while num > 1440:
+        num -= 1440
+    while num < 1:
+        num += 1440
+    return num
 
 def get_utc_game_number(timestamp=None):
     if timestamp:
@@ -59,37 +63,28 @@ def get_utc_game_number(timestamp=None):
 
 def extract_game_number(game_data):
     global last_assigned_game_num
-    
-    # 1. Пытаемся найти явный номер в данных API
-    explicit_num = None
+    calculated_num = None
+
     for key in ["num", "N", "I", "gameNum", "number"]:
         val = game_data.get(key)
         if val is not None:
             try:
                 num_int = int(val)
                 if 1 <= num_int <= 1440:
-                    explicit_num = num_int
+                    calculated_num = num_int
                     break
             except ValueError:
                 pass
-    
-    # 2. Если API отдает корректный явный номер, мы ему ДОВЕРЯЕМ.
-    # Это предотвращает ложное добавление +1 (например, 31 -> 32) 
-    # и корректно обрабатывает переход 1440 -> 1 без сложных проверок.
-    if explicit_num is not None:
-        calculated_num = explicit_num
-    else:
-        # 3. Если явного номера нет, вычисляем по времени старта
+
+    if calculated_num is None:
         start_time = game_data.get("S") or game_data.get("startDate") or game_data.get("S_T")
         calculated_num = get_utc_game_number(start_time)
-        
-        # 4. Корректировка только для вычисленного по времени номера
-        if last_assigned_game_num is not None:
-            if calculated_num <= last_assigned_game_num:
-                # Если время "откатилось" назад, но это не переход через полночь
-                if not (last_assigned_game_num >= 1435 and calculated_num <= 10):
-                    calculated_num = normalize_game_num(last_assigned_game_num + 1)
-    
+
+    if last_assigned_game_num is not None:
+        if calculated_num <= last_assigned_game_num:
+            if not (last_assigned_game_num >= 1438 and calculated_num <= 3):
+                calculated_num = normalize_game_num(last_assigned_game_num + 1)
+
     last_assigned_game_num = calculated_num
     return calculated_num
 
@@ -242,7 +237,7 @@ def get_active_games_info(session):
 
 def main():
     global active_games, game_history, current_prediction
-    print("🚀 Запуск: трансляция + новые прогнозы...")
+    print("🚀 Запуск: трансляция + новые прогнозы без двойных пробелов...")
     session = requests.Session()
     
     while True:
@@ -332,7 +327,7 @@ def main():
                         current_prediction["predicted_value"] = pred_val
                         send_new_prediction(game_num, pred_sym, target_num)
                 
-                # --- ТРАНСЛЯЦИЯ В ТЕЛЕГРАМ-КАНАЛ ---
+                # --- ТРАНСЛЯЦИЯ В ТЕЛЕГРАМ-КАНАЛ (БЕЗ ДВОЙНЫХ ПРОБЕЛОВ) ---
                 current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
                 
                 if current_state != slot["last_state"] and (p1_cards or p2_cards):
