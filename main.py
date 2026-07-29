@@ -76,25 +76,41 @@ current_prediction = {
 # ============================================================
 
 def normalize_game_num(num):
+
     while num > 1440:
+
         num -= 1440
+
     while num < 1:
+
         num += 1440
+
     return num
 
 def get_initial_game_number():
+
     now = datetime.datetime.now(timezone.utc)
-    return (now.hour * 60) + now.minute
+
+    return (now.hour * 60) + now.minute          # без +1
 
 def extract_game_number(game_data):
+
     global last_assigned_game_num
+
     if last_assigned_game_num is None:
+
         num = get_initial_game_number()
+
         print(f"🔢 Первый номер (по времени): {num}")
+
     else:
+
         num = normalize_game_num(last_assigned_game_num + 1)
+
         print(f"🔢 Следующий номер: {num}")
+
     last_assigned_game_num = num
+
     return num
 
 # ============================================================
