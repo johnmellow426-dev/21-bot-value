@@ -97,7 +97,7 @@ def get_initial_game_number():
     """
     now = datetime.datetime.now(timezone.utc)
     # Большинство серверов Melbet считают номер как hour*60 + minute + 1
-    return (now.hour * 60) + now.minute + 1
+    return (now.hour * 60) + now.minute
 
 
 def extract_game_number(game_data):
