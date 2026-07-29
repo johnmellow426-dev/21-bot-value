@@ -76,41 +76,25 @@ current_prediction = {
 # ============================================================
 
 def normalize_game_num(num):
-
     while num > 1440:
-
         num -= 1440
-
     while num < 1:
-
         num += 1440
-
     return num
 
 def get_initial_game_number():
-
     now = datetime.datetime.now(timezone.utc)
-
-    return (now.hour * 60) + now.minute          # без +1
+    return (now.hour * 60) + now.minute
 
 def extract_game_number(game_data):
-
     global last_assigned_game_num
-
     if last_assigned_game_num is None:
-
         num = get_initial_game_number()
-
         print(f"🔢 Первый номер (по времени): {num}")
-
     else:
-
         num = normalize_game_num(last_assigned_game_num + 1)
-
         print(f"🔢 Следующий номер: {num}")
-
     last_assigned_game_num = num
-
     return num
 
 # ============================================================
@@ -146,13 +130,29 @@ def get_prediction_for_card(card_value):
         return 1, "A (Туз)"
 
 def predict_exact_card_and_suit(predicted_value, trigger_suit):
+    """
+    Масть точной карты = масть триггерной карты + 2 шага по кругу:
+    ♠️(0) -> ♥️(3) -> ♣️(1) -> ♦️(2) -> ♠️(0)
+    Только для старших карт (A, J, Q, K).
+    """
     if predicted_value not in HIGH_CARD_VALUES:
         return None, None
+    
     if trigger_suit is None or trigger_suit not in SUITS:
         return None, None
+    
+    # Смещение на 2 шага вперед по кругу
+    # 0(♠️) -> 3(♥️) -> 1(♣️) -> 2(♦️) -> 0(♠️)
+    suit_mapping = {0: 3, 3: 1, 1: 2, 2: 0}
+    predicted_suit = suit_mapping.get(trigger_suit)
+    
+    if predicted_suit is None:
+        return None, None
+    
     card_short_val = CARD_VALUES.get(predicted_value, str(predicted_value))
-    exact_card_str = f"{card_short_val}{SUITS[trigger_suit]}"
-    return trigger_suit, exact_card_str
+    exact_card_str = f"{card_short_val}{SUITS[predicted_suit]}"
+    
+    return predicted_suit, exact_card_str
 
 def predict_target_recipient(predicted_value, first_card, history):
     score_p1 = 50
