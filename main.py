@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import re
 import datetime
 from datetime import timezone
 import requests
@@ -100,8 +101,7 @@ def get_utc_game_number(timestamp=None):
 
 def extract_game_number(game_data, game_id=None):
     """
-    Извлекает номер игры. Если игра уже сохранена в active_games,
-    возвращает её зафиксированный номер без изменений.
+    Автоматически извлекает порядковый (циклический) номер игры (например, №637) из данных API.
     """
     global last_assigned_game_num
 
@@ -111,28 +111,44 @@ def extract_game_number(game_data, game_id=None):
 
     calculated_num = None
 
-    # 2. Пытаемся взять номер из данных API
-    for key in ["num", "N", "I", "gameNum", "number"]:
-        val = game_data.get(key)
-        if val is not None:
-            try:
-                num_int = int(val)
-                if 1 <= num_int <= 1440:
-                    calculated_num = num_int
+    # 2. Пытаемся найти номер игры (№123 / #123) с помощью регулярного выражения в текстовых полях
+    search_fields = [
+        game_data.get("N"), game_data.get("G"), game_data.get("title"),
+        game_data.get("O1"), game_data.get("O2"), game_data.get("DI")
+    ]
+    
+    for text in search_fields:
+        if isinstance(text, str):
+            match = re.search(r'[№#]\s*(\d+)', text)
+            if match:
+                try:
+                    calculated_num = int(match.group(1))
                     break
-            except ValueError:
-                pass
+                except ValueError:
+                    pass
 
-    # 3. Если в поле номера пусто, высчитываем по времени
+    # 3. Если не нашли в тексте, ищем в стандартных числовых ключах
+    if calculated_num is None:
+        for key in ["num", "gameNum", "number"]:
+            val = game_data.get(key)
+            if val is not None:
+                try:
+                    num_int = int(val)
+                    if 1 <= num_int <= 1440:
+                        calculated_num = num_int
+                        break
+                except ValueError:
+                    pass
+
+    # 4. Если номер все еще не найден — высчитываем фолбэк по времени UTC
     if calculated_num is None:
         start_time = game_data.get("S") or game_data.get("startDate") or game_data.get("S_T")
         calculated_num = get_utc_game_number(start_time)
 
-    # 4. Проверка корректности порядка ТОЛЬКО для НОВЫХ игр
+    # 5. Проверка корректности порядка ТОЛЬКО для НОВЫХ игр
     if last_assigned_game_num is not None:
-        # Корректируем только если пришел старый номер и это не переход через полночь (1440 -> 1)
         if calculated_num <= last_assigned_game_num:
-            if not (last_assigned_game_num >= 1438 and calculated_num <= 3):
+            if not (last_assigned_game_num >= 990 and calculated_num <= 10): # Учитываем сброс 999 -> 1
                 calculated_num = normalize_game_num(last_assigned_game_num)
 
     last_assigned_game_num = calculated_num
@@ -470,7 +486,7 @@ def get_active_games_info(session):
 
 def main():
     global active_games, game_history
-    print("🚀 Запуск: трансляция + прогнозирование старших карт...")
+    print("🚀 Запуск: трансляция + автоопределение номера игры...")
     session = requests.Session()
 
     while True:
@@ -486,7 +502,7 @@ def main():
                 game_id = g_info["id"]
 
                 if game_id not in active_games:
-                    # Передаем game_id, чтобы функция зафиксировала конкретный номер за этой игрой
+                    # Извлекаем номер игры из полученных данных BК
                     game_num = extract_game_number(g_info["raw_data"], game_id)
                     active_games[game_id] = {
                         "message_id": None,
