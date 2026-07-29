@@ -98,17 +98,17 @@ def get_utc_game_number(timestamp=None):
         dt = datetime.datetime.fromtimestamp(timestamp, tz=timezone.utc)
     else:
         dt = datetime.datetime.now(timezone.utc)
-    return (dt.hour * 60) + dt.minute + 1
+    return (dt.hour * 60) + dt.minute          # без +1
 
 
 def extract_game_number(game_data):
     """
-    Правильная нумерация игр (логика из рабочего кода).
+    Правильная нумерация игр.
     """
     global last_assigned_game_num
     calculated_num = None
 
-    # 1. Пытаемся взять номер из стандартных ключей
+    # 1. Пытаемся взять номер из стандартных ключей API
     for key in ["num", "N", "I", "gameNum", "number"]:
         val = game_data.get(key)
         if val is not None:
@@ -125,12 +125,13 @@ def extract_game_number(game_data):
         start_time = game_data.get("S") or game_data.get("startDate") or game_data.get("S_T")
         calculated_num = get_utc_game_number(start_time)
 
-    # 3. Защита от отката номера (главное исправление)
+    # 3. Защита от отката (мягкая)
     if last_assigned_game_num is not None:
-        if calculated_num <= last_assigned_game_num:
+        if calculated_num < last_assigned_game_num:           # только если строго меньше
             # Разрешаем только реальный переход суток
             if not (last_assigned_game_num >= 1438 and calculated_num <= 3):
                 calculated_num = normalize_game_num(last_assigned_game_num + 1)
+        # если calculated_num == last_assigned_game_num — оставляем как есть
 
     last_assigned_game_num = calculated_num
     return calculated_num
