@@ -98,10 +98,20 @@ def get_utc_game_number(timestamp=None):
         dt = datetime.datetime.now(timezone.utc)
     return (dt.hour * 60) + dt.minute + 1
 
-def extract_game_number(game_data):
+def extract_game_number(game_data, game_id=None):
+    """
+    Извлекает номер игры. Если игра уже сохранена в active_games,
+    возвращает её зафиксированный номер без изменений.
+    """
     global last_assigned_game_num
+
+    # 1. Если эта игра уже зарегистрирована, возвращаем её зафиксированный номер
+    if game_id and game_id in active_games:
+        return active_games[game_id]["game_num"]
+
     calculated_num = None
 
+    # 2. Пытаемся взять номер из данных API
     for key in ["num", "N", "I", "gameNum", "number"]:
         val = game_data.get(key)
         if val is not None:
@@ -113,11 +123,14 @@ def extract_game_number(game_data):
             except ValueError:
                 pass
 
+    # 3. Если в поле номера пусто, высчитываем по времени
     if calculated_num is None:
         start_time = game_data.get("S") or game_data.get("startDate") or game_data.get("S_T")
         calculated_num = get_utc_game_number(start_time)
 
+    # 4. Проверка корректности порядка ТОЛЬКО для НОВЫХ игр
     if last_assigned_game_num is not None:
+        # Корректируем только если пришел старый номер и это не переход через полночь (1440 -> 1)
         if calculated_num <= last_assigned_game_num:
             if not (last_assigned_game_num >= 1438 and calculated_num <= 3):
                 calculated_num = normalize_game_num(last_assigned_game_num + 1)
@@ -473,7 +486,8 @@ def main():
                 game_id = g_info["id"]
 
                 if game_id not in active_games:
-                    game_num = extract_game_number(g_info["raw_data"])
+                    # Передаем game_id, чтобы функция зафиксировала конкретный номер за этой игрой
+                    game_num = extract_game_number(g_info["raw_data"], game_id)
                     active_games[game_id] = {
                         "message_id": None,
                         "game_num": game_num,
@@ -536,12 +550,11 @@ def main():
                     else:
                         p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
                         p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
-                        draw = (p1_score == p2_score) or (p1_score > 21 and p2_score > 21)
+                        draw = (p1_score == p2_score) or (p1_score > 21 and p1_score > 21)
 
                         res_p1 = "✅" if p1_win else ("🔰" if draw else "")
                         res_p2 = "✅" if p2_win else ("🔰" if draw else "")
 
-                        # Формирование тегов с использованием вынесенных констант
                         tags = []
                         if p1_score == 21 or p2_score == 21:
                             tags.append(TAG_O)
