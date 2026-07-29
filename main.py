@@ -59,7 +59,7 @@ def get_utc_game_number(timestamp=None):
         dt = datetime.datetime.fromtimestamp(timestamp, tz=timezone.utc)
     else:
         dt = datetime.datetime.now(timezone.utc)
-    return (dt.hour * 60) + dt.minute + 1
+    return (dt.hour * 60) + dt.minute 
 
 def extract_game_number(game_data):
     global last_assigned_game_num
