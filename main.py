@@ -44,15 +44,11 @@ current_prediction = {
 }
 
 
-# --- ВПОМОГАТЕЛЬНЫЕ ФУНКЦИИ НУМЕРАЦИИ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ НУМЕРАЦИИ ---
 
 def normalize_game_num(num):
     """Корректирует номер игры при переходе через 00:00 UTC (1..1440)"""
-    while num > 1440:
-        num -= 1440
-    while num < 1:
-        num += 1440
-    return num
+    return ((num - 1) % 1440) + 1
 
 def get_utc_game_number(timestamp=None):
     if timestamp:
@@ -63,27 +59,46 @@ def get_utc_game_number(timestamp=None):
 
 def extract_game_number(game_data):
     global last_assigned_game_num
-    calculated_num = None
-
+    
+    # 1. Пытаемся найти явный номер в данных API
+    explicit_num = None
     for key in ["num", "N", "I", "gameNum", "number"]:
         val = game_data.get(key)
         if val is not None:
             try:
                 num_int = int(val)
                 if 1 <= num_int <= 1440:
-                    calculated_num = num_int
+                    explicit_num = num_int
                     break
             except ValueError:
                 pass
-
-    if calculated_num is None:
+    
+    # 2. Если явного номера нет, вычисляем по времени старта
+    if explicit_num is None:
         start_time = game_data.get("S") or game_data.get("startDate") or game_data.get("S_T")
-        calculated_num = get_utc_game_number(start_time)
-
+        explicit_num = get_utc_game_number(start_time)
+    
+    # 3. Логика коррекции на основе последнего известного номера
     if last_assigned_game_num is not None:
-        if calculated_num <= last_assigned_game_num:
-            if not (last_assigned_game_num >= 1438 and calculated_num <= 3):
-                calculated_num = normalize_game_num(last_assigned_game_num + 1)
+        expected_num = normalize_game_num(last_assigned_game_num + 1)
+        
+        # Проверка на переход через полночь (сброс с ~1440 на ~1)
+        # Допускаем окно: предыдущая игра была >= 1435, а новая <= 10
+        is_rollover = (last_assigned_game_num >= 1435 and explicit_num <= 10)
+        
+        if is_rollover:
+            # Доверяем вычисленному/явному номеру при сбросе суток
+            calculated_num = explicit_num
+        else:
+            # Если номер меньше или равен предыдущему (и это не сброс), 
+            # значит API отдает старое/задержанное значение для нового game_id -> форсируем инкремент
+            if explicit_num <= last_assigned_game_num:
+                calculated_num = expected_num
+            else:
+                # Номер корректно увеличился, принимаем его как есть
+                calculated_num = explicit_num
+    else:
+        calculated_num = explicit_num
 
     last_assigned_game_num = calculated_num
     return calculated_num
@@ -302,89 +317,4 @@ def main():
                     # 1. ПРОВЕРКА ТЕКУЩЕГО АКТИВНОГО ПРОГНОЗА
                     if current_prediction.get("is_active"):
                         target_num = current_prediction["target_game_num"]
-                        plus_1_num = normalize_game_num(target_num + 1)
-                        plus_2_num = normalize_game_num(target_num + 2)
-
-                        is_hit = check_prediction_for_game(p1_values, p2_values)
-
-                        if game_num == target_num:
-                            if is_hit:
-                                finalize_prediction(0)  # Заход в целевой игре ✅0️⃣
-                        elif game_num == plus_1_num:
-                            if is_hit:
-                                finalize_prediction(1)  # Заход в +1 игре ✅1️⃣
-                        elif game_num == plus_2_num:
-                            if is_hit:
-                                finalize_prediction(2)  # Заход в +2 игре ✅2️⃣
-                            else:
-                                finalize_prediction(-1) # Захода не было за 3 игры ❌
-                    
-                    # 2. СОЗДАНИЕ НОВОГО ПРОГНОЗА (Если сейчас нет активных прогнозов)
-                    if first_card and not current_prediction.get("is_active"):
-                        pred_val, pred_sym = get_prediction_for_card(first_card)
-                        target_num = normalize_game_num(game_num + 3)
-                        
-                        current_prediction["predicted_value"] = pred_val
-                        send_new_prediction(game_num, pred_sym, target_num)
-                
-                # --- ТРАНСЛЯЦИЯ В ТЕЛЕГРАМ-КАНАЛ (БЕЗ ДВОЙНЫХ ПРОБЕЛОВ) ---
-                current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
-                
-                if current_state != slot["last_state"] and (p1_cards or p2_cards):
-                    cards_p1 = " ".join(p1_cards) if p1_cards else "?"
-                    cards_p2 = " ".join(p2_cards) if p2_cards else "?"
-                    
-                    if not is_finished:
-                        arrow = "◀️" if p1_score < 17 else ("▶️" if p2_score < 17 else "")
-                        if arrow:
-                            msg = f"#N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
-                        else:
-                            msg = f"#N{game_num}. {p1_score}({cards_p1}) {p2_score}({cards_p2}) #T{total_points}"
-                    else:
-                        p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
-                        p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
-                        draw = (p1_score == p2_score) or (p1_score > 21 and p2_score > 21)
-                        
-                        res_p1 = "✅" if p1_win else ("🔰" if draw else "")
-                        res_p2 = "✅" if p2_win else ("🔰" if draw else "")
-                        
-                        tags = []
-                        if p1_score == 21 or p2_score == 21:
-                            tags.append("#O🔵")
-                        if (len(p1_values) == 2 and all(v in (1, 14) for v in p1_values)) or (len(p2_values) == 2 and all(v in (1, 14) for v in p2_values)):
-                            tags.append("#G🔴")
-                        if len(p1_cards) == 2 and len(p2_cards) == 2:
-                            tags.append("#R🟢")
-                        
-                        tags_str = f" {' '.join(tags)}" if tags else ""
-                        msg = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points}{tags_str}"
-                    
-                    try:
-                        if slot["message_id"] is None:
-                            sent = bot.send_message(CHANNEL_ID, msg)
-                            slot["message_id"] = sent.message_id
-                        else:
-                            bot.edit_message_text(chat_id=CHANNEL_ID, message_id=slot["message_id"], text=msg)
-                    except Exception as e:
-                        print(f"⚠️ Ошибка отправки в Telegram: {e}")
-                    
-                    slot["last_state"] = current_state
-                    if is_finished:
-                        slot["is_finished"] = True
-            
-            # Очистка памяти
-            finished_to_remove = [
-                gid for gid, data in active_games.items() 
-                if data["is_finished"] and gid not in current_game_ids
-            ]
-            for gid in finished_to_remove:
-                del active_games[gid]
-                
-            time.sleep(3)
-            
-        except Exception as e:
-            print(f"❌ Критическая ошибка цикла: {e}")
-            time.sleep(5)
-
-if __name__ == "__main__":
-    main()
+                        plus_1_num = normalize_game_num(target
