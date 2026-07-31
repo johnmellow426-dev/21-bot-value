@@ -22,6 +22,9 @@ STATISTIC_URL_TEMPLATE = os.getenv(
     "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gameId={game_id}&gr=1521&lng=ru&ref=8"
 )
 
+if not BOT_TOKEN:
+    raise ValueError("❌ Ошибка: Переменная окружения BOT_TOKEN не задана!")
+
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
 HEADERS = {
@@ -72,11 +75,16 @@ current_prediction = {
 
 
 # ============================================================
-#   НУМЕРАЦИЯ И ТОЧНЫЙ ПОИСК DISPLAY ID (1-1440)
+#    НУМЕРАЦИЯ И ТОЧНЫЙ ПОИСК DISPLAY ID (1-1440)
 # ============================================================
 
 def normalize_game_num(num):
     """Нормализует номер игры в пределах 1-1440"""
+    try:
+        num = int(num)
+    except (ValueError, TypeError):
+        return 1
+
     while num > 1440:
         num -= 1440
     while num < 1:
@@ -89,10 +97,9 @@ def extract_game_number(*data_sources):
         if not isinstance(data, dict):
             continue
 
-        # 1. Сначала ищем в dopInfo (именно там 1X/Melbet хранят номера игр)
+        # 1. Поиск в dopInfo
         dop_info = data.get("dopInfo")
         if isinstance(dop_info, dict):
-            # Проверяем все текстовые и числовые поля внутри dopInfo
             for k, v in dop_info.items():
                 if isinstance(v, (int, str)):
                     match = re.search(r'\b(\d{1,4})\b', str(v))
@@ -101,19 +108,18 @@ def extract_game_number(*data_sources):
                         if 1 <= val <= 1440:
                             return val
 
-        # 2. Прямая проверка полей DI, di, gameNum, num
+        # 2. Прямая проверка ключей
         for key in ["DI", "di", "Di", "gameNum", "game_num", "DI_NUM", "num"]:
             game_num = data.get(key)
             if game_num is not None:
                 try:
                     val = int(game_num)
-                    # Фильтруем длинные системные ID — нужный нам номер обычно в пределах 1..1440
                     if 1 <= val <= 1440:
                         return val
                 except (ValueError, TypeError):
                     pass
 
-        # 3. Проверка внутренних словарей (game, main, info, statistic, fullScoreDetail)
+        # 3. Проверка внутренних словарей
         for sub_key in ["game", "main", "info", "statistic", "fullScoreDetail"]:
             sub_dict = data.get(sub_key)
             if isinstance(sub_dict, dict):
@@ -125,7 +131,7 @@ def extract_game_number(*data_sources):
 
 
 # ============================================================
-#   КАРТЫ И ЛОГИКА
+#    КАРТЫ И ЛОГИКА
 # ============================================================
 
 def get_card_symbol(card_value, suit_code):
@@ -210,7 +216,7 @@ def predict_target_recipient(predicted_value, first_card, history):
 
 
 # ============================================================
-#   ПРОГНОЗИРОВАНИЕ
+#    ПРОГНОЗИРОВАНИЕ
 # ============================================================
 
 def send_new_prediction(trigger_num, symbol, exact_card, recipient, confidence, target_num):
@@ -380,7 +386,7 @@ def process_new_prediction(game_num, first_card_value, first_card_suit):
 
 
 # ============================================================
-#   СБОР ДАННЫХ И ОСНОВНОЙ ЦИКЛ
+#    СБОР ДАННЫХ И ОСНОВНОЙ ЦИКЛ
 # ============================================================
 
 def get_active_games_info(session):
@@ -422,27 +428,27 @@ def main():
                 if not game_id:
                     continue
 
-                # Инициализация слота для новой игры
                 if game_id not in active_games:
                     active_games[game_id] = {
                         "message_id": None,
                         "game_id": game_id,
-                        "game_num": None,      # Извлекается через extract_game_number (dopInfo / DI)
+                        "game_num": None,
                         "last_state": "",
                         "is_finished": False
                     }
 
                 slot = active_games[game_id]
 
-                # Запрашиваем детализацию статистики игры
                 stat_url = STATISTIC_URL_TEMPLATE.format(game_id=game_id)
-                resp = session.get(stat_url, headers=HEADERS, timeout=5)
-                if resp.status_code == 204 or not resp.text.strip():
+                try:
+                    resp = session.get(stat_url, headers=HEADERS, timeout=5)
+                    if resp.status_code == 204 or not resp.text.strip():
+                        continue
+                    stat_data = resp.json()
+                except Exception as e:
+                    print(f"⚠️ Ошибка сети при запросе игры #{game_id}: {e}")
                     continue
 
-                stat_data = resp.json()
-
-                # Извлекаем Display ID из ответов API
                 if not slot["game_num"]:
                     found_num = extract_game_number(stat_data, g_info["raw_data"])
                     if found_num:
@@ -463,7 +469,6 @@ def main():
 
                 is_finished = (status == "Игра завершена")
 
-                # Логика обработки завершенной игры
                 if is_finished and display_num not in game_history:
                     first_card_value = p1_values[0] if p1_values else None
                     first_card_suit = p1_full[0][1] if p1_full else None
@@ -523,14 +528,15 @@ def main():
 
                     msg = f"{header_line}\n{stat_line}"
 
-                    try:
-                        if slot["message_id"] is None:
-                            sent = bot.send_message(CHANNEL_ID, msg)
-                            slot["message_id"] = sent.message_id
-                        else:
-                            bot.edit_message_text(chat_id=CHANNEL_ID, message_id=slot["message_id"], text=msg)
-                    except Exception as e:
-                        print(f"⚠️ Ошибка отправки в Telegram: {e}")
+                    if CHANNEL_ID:
+                        try:
+                            if slot["message_id"] is None:
+                                sent = bot.send_message(CHANNEL_ID, msg)
+                                slot["message_id"] = sent.message_id
+                            else:
+                                bot.edit_message_text(chat_id=CHANNEL_ID, message_id=slot["message_id"], text=msg)
+                        except Exception as e:
+                            print(f"⚠️ Ошибка отправки в Telegram: {e}")
 
                     slot["last_state"] = current_state
                     if is_finished:
