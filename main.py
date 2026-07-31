@@ -52,7 +52,6 @@ TAG_R = "#R🟢"
 # --- ХРАНИЛИЩА ---
 active_games = {}
 game_history = {}
-last_assigned_game_num = None
 
 # --- ЕДИНЫЙ ПРОГНОЗ (общий и детальный одновременно) ---
 current_prediction = {
@@ -76,26 +75,31 @@ current_prediction = {
 # ============================================================
 
 def normalize_game_num(num):
+    """Нормализует номер игры в пределах 1-1440 (используется для расчёта будущих игр)"""
     while num > 1440:
         num -= 1440
     while num < 1:
         num += 1440
     return num
 
-def get_initial_game_number():
-    now = datetime.datetime.now(timezone.utc)
-    return (now.hour * 60) + now.minute
-
 def extract_game_number(game_data):
-    global last_assigned_game_num
-    if last_assigned_game_num is None:
-        num = get_initial_game_number()
-        print(f"🔢 Первый номер (по времени): {num}")
-    else:
-        num = normalize_game_num(last_assigned_game_num + 1)
-        print(f"🔢 Следующий номер: {num}")
-    last_assigned_game_num = num
-    return num
+    """Получает номер игры напрямую из API (поле DI - Display Id)"""
+    # Проверяем оба варианта написания ключа на случай разного регистра в API
+    game_num = game_data.get("DI") or game_data.get("di")
+    
+    if game_num is not None:
+        try:
+            num = int(game_num)
+            print(f"🔢 Номер игры из API (DI): {num}")
+            return num
+        except (ValueError, TypeError):
+            pass
+    
+    # Резервный вариант: если поле DI вдруг отсутствует, используем обычный ID
+    fallback_id = game_data.get("id")
+    print(f"⚠️ Поле DI не найдено в данных игры, используем резервный ID: {fallback_id}")
+    return int(fallback_id) if fallback_id else 0
+
 
 # ============================================================
 #   КАРТЫ И ЛОГИКА
@@ -142,7 +146,6 @@ def predict_exact_card_and_suit(predicted_value, trigger_suit):
         return None, None
     
     # Смещение на 2 шага вперед по кругу
-    # 0(♠️) -> 3(♥️) -> 1(♣️) -> 2(♦️) -> 0(♠️)
     suit_mapping = {0: 3, 3: 1, 1: 2, 2: 0}
     predicted_suit = suit_mapping.get(trigger_suit)
     
@@ -393,6 +396,7 @@ def get_active_games_info(session):
         for idx, g in enumerate(games):
             result.append({
                 "id": g.get("id"),
+                "di": g.get("DI") or g.get("di"), # Сохраняем для справки
                 "index": idx,
                 "is_finished": g.get("scores", {}).get("currentPeriodName") == "Игра завершена",
                 "raw_data": g
@@ -404,7 +408,7 @@ def get_active_games_info(session):
 
 
 def main():
-    global active_games, game_history, last_assigned_game_num
+    global active_games, game_history
     print("🚀 Запуск бота...")
     session = requests.Session()
 
@@ -421,6 +425,7 @@ def main():
                 game_id = g_info["id"]
 
                 if game_id not in active_games:
+                    # ТЕПЕРЬ НОМЕР БЕРЕТСЯ НАПРЯМУЮ ИЗ API (поле DI)
                     game_num = extract_game_number(g_info["raw_data"])
                     active_games[game_id] = {
                         "message_id": None,
