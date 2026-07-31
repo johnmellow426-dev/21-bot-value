@@ -53,10 +53,10 @@ TAG_R = "#R🟢"
 active_games = {}
 game_history = {}
 
-# --- ЕДИНЫЙ ПРОГНОЗ (общий и детальный одновременно) ---
+# --- ЕДИНЫЙ ПРОГНОЗ ---
 current_prediction = {
-    "message_id": None,              # ID сообщения в общем канале
-    "detailed_message_id": None,     # ID сообщения в детальном канале
+    "message_id": None,
+    "detailed_message_id": None,
     "trigger_game_num": None,
     "predicted_value": None,
     "predicted_symbol": None,
@@ -71,43 +71,51 @@ current_prediction = {
 
 
 # ============================================================
-#   НУМЕРАЦИЯ
+#   НУМЕРАЦИЯ И ПОИСК DISPLAY ID (num / DI / di)
 # ============================================================
 
 def normalize_game_num(num):
-    """Нормализует номер игры в пределах 1-1440 (используется для расчёта будущих игр)"""
+    """Нормализует номер игры в пределах 1-1440"""
     while num > 1440:
         num -= 1440
     while num < 1:
         num += 1440
     return num
 
-def extract_game_number(game_data):
-    """Получает номер игры (Display ID / DI) напрямую из API"""
-    if not isinstance(game_data, dict):
-        return 0
+def extract_game_number(*data_sources):
+    """Глубокий поиск ключа num / DI / di во всех переданных ответах API"""
+    for data in data_sources:
+        if not isinstance(data, dict):
+            continue
 
-    # Проверяем возможные варианты ключей в объекте игры
-    game_num = game_data.get("DI") or game_data.get("di") or game_data.get("Di")
-    
-    if game_num is not None:
-        try:
-            return int(game_num)
-        except (ValueError, TypeError):
-            pass
+        # 1. Проверяем ключ 'num' (основной ключ в этом API) и резервные 'DI'/'di'
+        game_num = data.get("num") or data.get("DI") or data.get("di") or data.get("Di")
+        if game_num is not None:
+            try:
+                val = int(game_num)
+                if val > 0:
+                    return val
+            except (ValueError, TypeError):
+                pass
 
-    # В некоторых версиях API DI лежит внутри вложенных структур
-    for key in ["game", "main", "info"]:
-        if isinstance(game_data.get(key), dict):
-            sub_di = game_data[key].get("DI") or game_data[key].get("di")
-            if sub_di is not None:
-                try:
-                    return int(sub_di)
-                except (ValueError, TypeError):
-                    pass
-
-    print(f"⚠️ Поле DI не найдено в raw_data! Доступные ключи: {list(game_data.keys())}")
-    return 0
+        # 2. Проверка внутренних словарей (game, main, info, statistic, fullScoreDetail)
+        for sub_key in ["game", "main", "info", "statistic", "fullScoreDetail"]:
+            sub_dict = data.get(sub_key)
+            if isinstance(sub_dict, dict):
+                sub_val = (
+                    sub_dict.get("num") or 
+                    sub_dict.get("DI") or 
+                    sub_dict.get("di") or 
+                    sub_dict.get("Di")
+                )
+                if sub_val is not None:
+                    try:
+                        val = int(sub_val)
+                        if val > 0:
+                            return val
+                    except (ValueError, TypeError):
+                        pass
+    return None
 
 
 # ============================================================
@@ -149,7 +157,7 @@ def predict_exact_card_and_suit(predicted_value, trigger_suit):
     if trigger_suit is None or trigger_suit not in SUITS:
         return None, None
     
-    suit_mapping = {0: 2, 3: 1, 2: 3, 1: 0}
+    suit_mapping = {0: 1, 1: 2, 2: 3, 3: 1}
     predicted_suit = suit_mapping.get(trigger_suit)
     
     if predicted_suit is None:
@@ -196,7 +204,7 @@ def predict_target_recipient(predicted_value, first_card, history):
 
 
 # ============================================================
-#   ЕДИНЫЙ ПРОГНОЗ (публикуется в оба канала)
+#   ПРОГНОЗИРОВАНИЕ
 # ============================================================
 
 def send_new_prediction(trigger_num, symbol, exact_card, recipient, confidence, target_num):
@@ -374,15 +382,11 @@ def get_active_games_info(session):
         resp = session.get(VIRTUAL_URL, headers=HEADERS, timeout=10)
         data = resp.json()
         
-        # Получаем массив игр (может быть в "games" или напрямую в "Value")
         games = data.get("games") or data.get("Value") or []
         result = []
         for idx, g in enumerate(games):
-            # Считываем DI непосредственно при спарсинге массива игр
-            di_val = g.get("DI") or g.get("di") or g.get("Di")
             result.append({
                 "id": g.get("id") or g.get("I"),
-                "di": di_val,
                 "index": idx,
                 "is_finished": g.get("scores", {}).get("currentPeriodName") == "Игра завершена",
                 "raw_data": g
@@ -395,7 +399,7 @@ def get_active_games_info(session):
 
 def main():
     global active_games, game_history
-    print("🚀 Запуск бота PRO 21...")
+    print("🚀 Запуск обновленного бота PRO 21...")
     session = requests.Session()
 
     while True:
@@ -412,52 +416,53 @@ def main():
                 if not game_id:
                     continue
 
+                # Инициализация слота для новой игры
                 if game_id not in active_games:
-                    # Корректное извлечение Display ID (DI)
-                    game_num = g_info.get("di")
-                    if not game_num:
-                        game_num = extract_game_number(g_info["raw_data"])
-                    else:
-                        try:
-                            game_num = int(game_num)
-                        except (ValueError, TypeError):
-                            game_num = extract_game_number(g_info["raw_data"])
-
                     active_games[game_id] = {
                         "message_id": None,
-                        "game_id": game_id,      # Глобальный ID (например, 740709369)
-                        "game_num": game_num,    # Display ID (например, 1379)
+                        "game_id": game_id,
+                        "game_num": None,      # Извлекается через extract_game_number (num)
                         "last_state": "",
                         "is_finished": False
                     }
-                    print(f"🆕 Начата игра #{game_num} (ID: {game_id})")
 
                 slot = active_games[game_id]
-                game_num = slot["game_num"]
 
+                # Запрашиваем детализацию статистики игры
                 stat_url = STATISTIC_URL_TEMPLATE.format(game_id=game_id)
                 resp = session.get(stat_url, headers=HEADERS, timeout=5)
                 if resp.status_code == 204 or not resp.text.strip():
                     continue
 
-                data = resp.json()
-                score_detail = data.get("fullScoreDetail", {})
+                stat_data = resp.json()
+
+                # Извлекаем Display ID (ключ 'num') из ответа API
+                if not slot["game_num"]:
+                    found_num = extract_game_number(stat_data, g_info["raw_data"])
+                    if found_num:
+                        slot["game_num"] = found_num
+                        print(f"✅ Извлечен Display ID (num): {found_num} для игры #{game_id}")
+
+                display_num = slot["game_num"] if slot["game_num"] else game_id
+
+                score_detail = stat_data.get("fullScoreDetail", {})
                 p1_score = score_detail.get("scoreOpp1", 0)
                 p2_score = score_detail.get("scoreOpp2", 0)
                 total_points = p1_score + p2_score
-                status = data.get("currentPeriodName", "")
+                status = stat_data.get("currentPeriodName", "")
 
-                stat = data.get("statistic", {}).get("main", {})
+                stat = stat_data.get("statistic", {}).get("main", {})
                 p1_cards, p1_values, p1_full = parse_cards_detail(stat.get("P1", "[]"))
                 p2_cards, p2_values, p2_full = parse_cards_detail(stat.get("P2", "[]"))
 
                 is_finished = (status == "Игра завершена")
 
-                if is_finished and game_num not in game_history:
+                # Логика обработки завершенной игры
+                if is_finished and display_num not in game_history:
                     first_card_value = p1_values[0] if p1_values else None
                     first_card_suit = p1_full[0][1] if p1_full else None
 
-                    game_history[game_num] = {
+                    game_history[display_num] = {
                         "player_first_card": first_card_value,
                         "player_values": p1_values,
                         "dealer_values": p2_values,
@@ -469,31 +474,30 @@ def main():
                         oldest = min(game_history.keys())
                         del game_history[oldest]
 
-                    print(f"📝 Игра #{game_num} завершена | Триггер: {first_card_value} масть {first_card_suit}")
+                    print(f"📝 Игра #{display_num} завершена | Триггер: {first_card_value}")
 
-                    process_prediction_check(game_num, p1_values, p2_values, p1_full, p2_full)
+                    process_prediction_check(display_num, p1_values, p2_values, p1_full, p2_full)
                     
                     if not current_prediction.get("is_active"):
-                        process_new_prediction(game_num, first_card_value, first_card_suit)
+                        process_new_prediction(display_num, first_card_value, first_card_suit)
 
-                current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
+                current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}_{display_num}"
 
                 if current_state != slot["last_state"] and (p1_cards or p2_cards):
                     cards_p1 = " ".join(p1_cards) if p1_cards else "?"
                     cards_p2 = " ".join(p2_cards) if p2_cards else "?"
 
-                    # Формируем первую строку-заголовок
-                    header_line = f"🎮 ИГРА #N{game_id}   Display ID: {game_num}"
+                    header_line = f"🎮 ИГРА #N{game_id}   Display ID: {display_num}"
 
                     if not is_finished:
                         arrow = "◀️" if p1_score < 17 else ("▶️" if p2_score < 17 else "")
                         if arrow:
-                            stat_line = f"#N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
+                            stat_line = f"#N{display_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
                         else:
-                            stat_line = f"#N{game_num}. {p1_score}({cards_p1}) {p2_score}({cards_p2}) #T{total_points}"
+                            stat_line = f"#N{display_num}. {p1_score}({cards_p1}) {p2_score}({cards_p2}) #T{total_points}"
                     else:
                         p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
-                        p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p1_score <= 21)
+                        p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
                         draw = (p1_score == p2_score) or (p1_score > 21 and p2_score > 21)
 
                         res_p1 = "✅" if p1_win else ("🔰" if draw else "")
@@ -509,9 +513,8 @@ def main():
                             tags.append(TAG_R)
 
                         tags_str = f" {' '.join(tags)}" if tags else ""
-                        stat_line = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points}{tags_str}"
+                        stat_line = f"#N{display_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points}{tags_str}"
 
-                    # Склеиваем всё в итоговый текст
                     msg = f"{header_line}\n{stat_line}"
 
                     try:
