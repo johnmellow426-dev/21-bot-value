@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import re
 import datetime
 from datetime import timezone
 import requests
@@ -71,7 +72,7 @@ current_prediction = {
 
 
 # ============================================================
-#   НУМЕРАЦИЯ И ПОИСК DISPLAY ID (num / DI / di)
+#   НУМЕРАЦИЯ И ТОЧНЫЙ ПОИСК DISPLAY ID (1-1440)
 # ============================================================
 
 def normalize_game_num(num):
@@ -83,38 +84,43 @@ def normalize_game_num(num):
     return num
 
 def extract_game_number(*data_sources):
-    """Глубокий поиск ключа num / DI / di во всех переданных ответах API"""
+    """Умный поиск Display ID (короткого номера игры 1-1440)"""
     for data in data_sources:
         if not isinstance(data, dict):
             continue
 
-        # 1. Проверяем ключ 'num' (основной ключ в этом API) и резервные 'DI'/'di'
-        game_num = data.get("num") or data.get("DI") or data.get("di") or data.get("Di")
-        if game_num is not None:
-            try:
-                val = int(game_num)
-                if val > 0:
-                    return val
-            except (ValueError, TypeError):
-                pass
+        # 1. Сначала ищем в dopInfo (именно там 1X/Melbet хранят номера игр)
+        dop_info = data.get("dopInfo")
+        if isinstance(dop_info, dict):
+            # Проверяем все текстовые и числовые поля внутри dopInfo
+            for k, v in dop_info.items():
+                if isinstance(v, (int, str)):
+                    match = re.search(r'\b(\d{1,4})\b', str(v))
+                    if match:
+                        val = int(match.group(1))
+                        if 1 <= val <= 1440:
+                            return val
 
-        # 2. Проверка внутренних словарей (game, main, info, statistic, fullScoreDetail)
+        # 2. Прямая проверка полей DI, di, gameNum, num
+        for key in ["DI", "di", "Di", "gameNum", "game_num", "DI_NUM", "num"]:
+            game_num = data.get(key)
+            if game_num is not None:
+                try:
+                    val = int(game_num)
+                    # Фильтруем длинные системные ID — нужный нам номер обычно в пределах 1..1440
+                    if 1 <= val <= 1440:
+                        return val
+                except (ValueError, TypeError):
+                    pass
+
+        # 3. Проверка внутренних словарей (game, main, info, statistic, fullScoreDetail)
         for sub_key in ["game", "main", "info", "statistic", "fullScoreDetail"]:
             sub_dict = data.get(sub_key)
             if isinstance(sub_dict, dict):
-                sub_val = (
-                    sub_dict.get("num") or 
-                    sub_dict.get("DI") or 
-                    sub_dict.get("di") or 
-                    sub_dict.get("Di")
-                )
-                if sub_val is not None:
-                    try:
-                        val = int(sub_val)
-                        if val > 0:
-                            return val
-                    except (ValueError, TypeError):
-                        pass
+                sub_val = extract_game_number(sub_dict)
+                if sub_val:
+                    return sub_val
+
     return None
 
 
@@ -157,7 +163,7 @@ def predict_exact_card_and_suit(predicted_value, trigger_suit):
     if trigger_suit is None or trigger_suit not in SUITS:
         return None, None
     
-    suit_mapping = {0: 1, 1: 2, 2: 3, 3: 1}
+    suit_mapping = {0: 3, 3: 2, 2: 1, 1: 0}
     predicted_suit = suit_mapping.get(trigger_suit)
     
     if predicted_suit is None:
@@ -421,7 +427,7 @@ def main():
                     active_games[game_id] = {
                         "message_id": None,
                         "game_id": game_id,
-                        "game_num": None,      # Извлекается через extract_game_number (num)
+                        "game_num": None,      # Извлекается через extract_game_number (dopInfo / DI)
                         "last_state": "",
                         "is_finished": False
                     }
@@ -436,12 +442,12 @@ def main():
 
                 stat_data = resp.json()
 
-                # Извлекаем Display ID (ключ 'num') из ответа API
+                # Извлекаем Display ID из ответов API
                 if not slot["game_num"]:
                     found_num = extract_game_number(stat_data, g_info["raw_data"])
                     if found_num:
                         slot["game_num"] = found_num
-                        print(f"✅ Извлечен Display ID (num): {found_num} для игры #{game_id}")
+                        print(f"✅ Извлечен Display ID: {found_num} для игры #{game_id}")
 
                 display_num = slot["game_num"] if slot["game_num"] else game_id
 
