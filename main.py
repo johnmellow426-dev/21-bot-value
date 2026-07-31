@@ -84,7 +84,6 @@ def normalize_game_num(num):
 
 def extract_game_number(game_data):
     """Получает номер игры напрямую из API (поле DI - Display Id)"""
-    # Проверяем оба варианта написания ключа на случай разного регистра в API
     game_num = game_data.get("DI") or game_data.get("di")
     
     if game_num is not None:
@@ -95,7 +94,7 @@ def extract_game_number(game_data):
         except (ValueError, TypeError):
             pass
     
-    # Резервный вариант: если поле DI вдруг отсутствует, используем обычный ID
+    # Резервный вариант: если поле DI отсутствует, используем обычный ID
     fallback_id = game_data.get("id")
     print(f"⚠️ Поле DI не найдено в данных игры, используем резервный ID: {fallback_id}")
     return int(fallback_id) if fallback_id else 0
@@ -134,19 +133,13 @@ def get_prediction_for_card(card_value):
         return 1, "A (Туз)"
 
 def predict_exact_card_and_suit(predicted_value, trigger_suit):
-    """
-    Масть точной карты = масть триггерной карты + 2 шага по кругу:
-    ♠️(0) -> ♥️(3) -> ♣️(1) -> ♦️(2) -> ♠️(0)
-    Только для старших карт (A, J, Q, K).
-    """
     if predicted_value not in HIGH_CARD_VALUES:
         return None, None
     
     if trigger_suit is None or trigger_suit not in SUITS:
         return None, None
     
-    # Смещение на 2 шага вперед по кругу
-    suit_mapping = {0: 3, 3: 2, 2: 1, 2: 0}
+    suit_mapping = {0: 2, 3: 0, 2: 3, 1: 0}
     predicted_suit = suit_mapping.get(trigger_suit)
     
     if predicted_suit is None:
@@ -197,10 +190,8 @@ def predict_target_recipient(predicted_value, first_card, history):
 # ============================================================
 
 def send_new_prediction(trigger_num, symbol, exact_card, recipient, confidence, target_num):
-    """Отправляет прогноз в оба канала одновременно"""
     dogen = current_prediction["dogen_level"]
     
-    # --- Общий прогноз (только значение) ---
     if PREDICTION_CHANNEL_ID:
         general_msg = f"Игра №{target_num}\nЗначение: {symbol}\nДогон: {dogen}\nРезультат:"
         try:
@@ -210,7 +201,6 @@ def send_new_prediction(trigger_num, symbol, exact_card, recipient, confidence, 
         except Exception as e:
             print(f"❌ Ошибка отправки общего прогноза: {e}")
     
-    # --- Детальный прогноз (с дополнительной информацией) ---
     if PREDICTION_DETAILED_CHANNEL_ID:
         detailed_msg = f"🎯 Игра №{target_num}\nЗначение: {symbol}\n"
         if exact_card:
@@ -223,7 +213,6 @@ def send_new_prediction(trigger_num, symbol, exact_card, recipient, confidence, 
         except Exception as e:
             print(f"❌ Ошибка отправки детального прогноза: {e}")
     
-    # Обновляем статус
     current_prediction["trigger_game_num"] = trigger_num
     current_prediction["target_game_num"] = target_num
     current_prediction["predicted_symbol"] = symbol
@@ -244,7 +233,6 @@ def check_prediction_for_game(player_values, dealer_values, predicted_val):
     return False
 
 def check_detailed_prediction_for_game(p1_full, p2_full, predicted_val, predicted_suit, target_recipient):
-    """Проверяет детальный прогноз (значение и точную карту)"""
     if not predicted_val:
         return False, False
 
@@ -253,13 +241,11 @@ def check_detailed_prediction_for_game(p1_full, p2_full, predicted_val, predicte
     val_hit = False
     exact_hit = False
 
-    # 1. Значение у адресата
     for cv, cs in check_cards_for_value:
         if (predicted_val == 1 and cv in [1, 14]) or (cv == predicted_val):
             val_hit = True
             break
 
-    # 2. Точная карта у любого из двоих
     if predicted_suit is not None:
         for cv, cs in (p1_full + p2_full):
             if ((predicted_val == 1 and cv in [1, 14]) or (cv == predicted_val)) and cs == predicted_suit:
@@ -269,7 +255,6 @@ def check_detailed_prediction_for_game(p1_full, p2_full, predicted_val, predicte
     return val_hit, exact_hit
 
 def finalize_prediction(status_code, exact_hit=False):
-    """Обновляет оба прогноза с результатом"""
     if not current_prediction.get("is_active"):
         return
     
@@ -284,7 +269,6 @@ def finalize_prediction(status_code, exact_hit=False):
     if exact_hit and status_code >= 0:
         res_str += " 🎯 (ТОЧНАЯ КАРТА!)"
 
-    # --- Обновляем общий прогноз ---
     if current_prediction.get("message_id") and PREDICTION_CHANNEL_ID:
         general_msg = f"Игра №{target_num}\nЗначение: {symbol}\nДогон: {dogen}\nРезультат: {res_str}"
         try:
@@ -297,7 +281,6 @@ def finalize_prediction(status_code, exact_hit=False):
         except Exception as e:
             print(f"❌ Ошибка обновления общего прогноза: {e}")
 
-    # --- Обновляем детальный прогноз ---
     if current_prediction.get("detailed_message_id") and PREDICTION_DETAILED_CHANNEL_ID:
         detailed_msg = f"🎯 Игра №{target_num}\nЗначение: {symbol}\n"
         if exact_card:
@@ -313,7 +296,6 @@ def finalize_prediction(status_code, exact_hit=False):
         except Exception as e:
             print(f"❌ Ошибка обновления детального прогноза: {e}")
 
-    # Обновляем догон
     if status_code >= 0:
         current_prediction["dogen_level"] = 1
     else:
@@ -325,7 +307,6 @@ def finalize_prediction(status_code, exact_hit=False):
 
 
 def process_prediction_check(game_num, p1_values, p2_values, p1_full, p2_full):
-    """Проверяет оба прогноза для завершенной игры"""
     if not current_prediction.get("is_active"):
         return
     
@@ -336,16 +317,12 @@ def process_prediction_check(game_num, p1_values, p2_values, p1_full, p2_full):
     pred_suit = current_prediction.get("predicted_suit_code")
     recipient = current_prediction.get("target_recipient")
     
-    # Проверяем основное значение (для общего прогноза)
     is_hit = check_prediction_for_game(p1_values, p2_values, pred_val)
     
-    # Проверяем детальный прогноз
     is_detailed_hit, exact_hit = check_detailed_prediction_for_game(
         p1_full, p2_full, pred_val, pred_suit, recipient
     )
 
-    # Логика: если значение не совпало - общий прогноз проигран
-    # Для детального проверяем отдельно
     if game_num == target_num:
         if is_hit:
             finalize_prediction(0, exact_hit if is_detailed_hit else False)
@@ -360,26 +337,21 @@ def process_prediction_check(game_num, p1_values, p2_values, p1_full, p2_full):
 
 
 def process_new_prediction(game_num, first_card_value, first_card_suit):
-    """Создает новый прогноз (в оба канала)"""
     if not first_card_value:
         return
 
     pred_val, pred_sym = get_prediction_for_card(first_card_value)
     target_num = normalize_game_num(game_num + 3)
 
-    # Проверяем, активен ли уже прогноз
     if current_prediction.get("is_active"):
         return
 
-    # Рассчитываем детальные данные
     suit_code, exact_card_str = predict_exact_card_and_suit(pred_val, first_card_suit)
     recipient, confidence = predict_target_recipient(pred_val, first_card_value, game_history)
 
-    # Сохраняем данные прогноза
     current_prediction["predicted_value"] = pred_val
     current_prediction["predicted_suit_code"] = suit_code
     
-    # Отправляем прогноз в оба канала
     send_new_prediction(game_num, pred_sym, exact_card_str, recipient, confidence, target_num)
 
 
@@ -396,7 +368,7 @@ def get_active_games_info(session):
         for idx, g in enumerate(games):
             result.append({
                 "id": g.get("id"),
-                "di": g.get("DI") or g.get("di"), # Сохраняем для справки
+                "di": g.get("DI") or g.get("di"),
                 "index": idx,
                 "is_finished": g.get("scores", {}).get("currentPeriodName") == "Игра завершена",
                 "raw_data": g
@@ -425,11 +397,11 @@ def main():
                 game_id = g_info["id"]
 
                 if game_id not in active_games:
-                    # ТЕПЕРЬ НОМЕР БЕРЕТСЯ НАПРЯМУЮ ИЗ API (поле DI)
                     game_num = extract_game_number(g_info["raw_data"])
                     active_games[game_id] = {
                         "message_id": None,
-                        "game_num": game_num,
+                        "game_id": game_id,      # Сохраняем исходный ID
+                        "game_num": game_num,    # Display ID
                         "last_state": "",
                         "is_finished": False
                     }
@@ -474,10 +446,8 @@ def main():
 
                     print(f"📝 Игра #{game_num} завершена | Триггер: {first_card_value} масть {first_card_suit}")
 
-                    # Проверяем активные прогнозы (общий и детальный вместе)
                     process_prediction_check(game_num, p1_values, p2_values, p1_full, p2_full)
                     
-                    # Создаем новый прогноз только если старый уже завершен
                     if not current_prediction.get("is_active"):
                         process_new_prediction(game_num, first_card_value, first_card_suit)
 
@@ -487,12 +457,15 @@ def main():
                     cards_p1 = " ".join(p1_cards) if p1_cards else "?"
                     cards_p2 = " ".join(p2_cards) if p2_cards else "?"
 
+                    # Заголовок с ID и Display ID
+                    header_line = f"🎮 ИГРА #N{game_id}   Display ID: {game_num}"
+
                     if not is_finished:
-                        arrow = "◀️" if p1_score < 17 else ("▶️" if p2_score < 17 else "")
+                        arrow = "◀️" if p1_score < 18  else ("▶️" if p2_score < 17 else "")
                         if arrow:
-                            msg = f"#N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
+                            stat_line = f"#N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
                         else:
-                            msg = f"#N{game_num}. {p1_score}({cards_p1}) {p2_score}({cards_p2}) #T{total_points}"
+                            stat_line = f"#N{game_num}. {p1_score}({cards_p1}) {p2_score}({cards_p2}) #T{total_points}"
                     else:
                         p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
                         p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
@@ -511,7 +484,10 @@ def main():
                             tags.append(TAG_R)
 
                         tags_str = f" {' '.join(tags)}" if tags else ""
-                        msg = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points}{tags_str}"
+                        stat_line = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points}{tags_str}"
+
+                    # Полное сообщение
+                    msg = f"{header_line}\n{stat_line}"
 
                     try:
                         if slot["message_id"] is None:
