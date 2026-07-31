@@ -146,7 +146,7 @@ def predict_exact_card_and_suit(predicted_value, trigger_suit):
         return None, None
     
     # Смещение на 2 шага вперед по кругу
-    suit_mapping = {0: 3, 3: 1, 1: 2, 2: 0}
+    suit_mapping = {0: 3, 3: 2, 2: 1, 2: 0}
     predicted_suit = suit_mapping.get(trigger_suit)
     
     if predicted_suit is None:
