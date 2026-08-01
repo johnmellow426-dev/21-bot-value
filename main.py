@@ -420,19 +420,34 @@ def main():
             for g_info in games_info:
                 game_id = g_info["id"]
 
+                # 📌 1. ОБНАРУЖЕНИЕ НОВОЙ ИГРЫ И МГНОВЕННЫЙ АНОНС
                 if game_id not in active_games:
                     game_num = extract_game_number(g_info["raw_data"])
+                    
+                    # Формируем текст анонса
+                    announcement_text = f"⏳ Ожидание игры #N{game_num}\n (ID: {game_id})"
+                    msg_id = None
+                    
+                    # 🚀 Отправляем анонс СРАЗУ в Telegram
+                    if CHANNEL_ID:
+                        try:
+                            sent = bot.send_message(CHANNEL_ID, announcement_text)
+                            msg_id = sent.message_id
+                            print(f"📡 Анонсирована будущая игра #N{game_num} (ID: {game_id})")
+                        except Exception as e:
+                            print(f"⚠️ Ошибка отправки анонса #N{game_num}: {e}")
+
                     active_games[game_id] = {
-                        "message_id": None,
+                        "message_id": msg_id,
                         "game_num": game_num,
-                        "last_state": "",
+                        "last_state": announcement_text,
                         "is_finished": False
                     }
-                    print(f"🆕 Начата игра #{game_num} (ID: {game_id})")
 
                 slot = active_games[game_id]
                 game_num = slot["game_num"]
 
+                # 📌 2. ПОЛУЧЕНИЕ СТАТИСТИКИ
                 stat_url = STATISTIC_URL_TEMPLATE.format(game_id=game_id)
                 resp = session.get(stat_url, headers=HEADERS, timeout=5)
                 if resp.status_code == 204 or not resp.text.strip():
@@ -451,6 +466,7 @@ def main():
 
                 is_finished = (status == "Игра завершена")
 
+                # 📌 3. ОБРАБОТКА ЗАВЕРШЕНИЯ
                 if is_finished and game_num not in game_history:
                     first_card_value = p1_values[0] if p1_values else None
                     first_card_suit = p1_full[0][1] if p1_full else None
@@ -469,15 +485,15 @@ def main():
 
                     print(f"📝 Игра #{game_num} завершена | Триггер: {first_card_value} масть {first_card_suit}")
 
-                    # Проверяем активные прогнозы (общий и детальный вместе)
                     process_prediction_check(game_num, p1_values, p2_values, p1_full, p2_full)
                     
-                    # Создаем новый прогноз только если старый уже завершен
                     if not current_prediction.get("is_active"):
                         process_new_prediction(game_num, first_card_value, first_card_suit)
 
+                # 📌 4. ОБНОЛЕНИЕ СООБЩЕНИЯ (когда пошла игра или появились карты)
                 current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
 
+                # Обновляем ТОЛЬКО если состояние изменилось И появились карты
                 if current_state != slot["last_state"] and (p1_cards or p2_cards):
                     cards_p1 = " ".join(p1_cards) if p1_cards else "?"
                     cards_p2 = " ".join(p2_cards) if p2_cards else "?"
@@ -490,7 +506,7 @@ def main():
                             msg = f"#N{game_num}. {p1_score}({cards_p1}) {p2_score}({cards_p2}) #T{total_points}\n (ID: {game_id})"
                     else:
                         p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
-                        p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
+                        p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p1_score <= 21)
                         draw = (p1_score == p2_score) or (p1_score > 21 and p2_score > 21)
 
                         res_p1 = "✅" if p1_win else ("🔰" if draw else "")
@@ -509,18 +525,21 @@ def main():
                         msg = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points}{tags_str}\n (ID: {game_id})"
 
                     try:
+                        # Если по какой-то причине анонс не ушел, отправляем новое сообщение
                         if slot["message_id"] is None:
                             sent = bot.send_message(CHANNEL_ID, msg)
                             slot["message_id"] = sent.message_id
                         else:
+                            # Редактируем отправленный анонс!
                             bot.edit_message_text(chat_id=CHANNEL_ID, message_id=slot["message_id"], text=msg)
                     except Exception as e:
-                        print(f"⚠️ Ошибка отправки в Telegram: {e}")
+                        print(f"⚠️ Ошибка обновления сообщения в Telegram: {e}")
 
                     slot["last_state"] = current_state
                     if is_finished:
                         slot["is_finished"] = True
 
+            # Очистка памяти
             finished_to_remove = [
                 gid for gid, data in active_games.items()
                 if data["is_finished"] and gid not in current_game_ids
