@@ -15,13 +15,11 @@ PREDICTION_DETAILED_CHANNEL_ID = os.getenv("PREDICTION_DETAILED_CHANNEL_ID")
 
 VIRTUAL_URL = os.getenv(
     "VIRTUAL_URL",
-    "https://melbet-0018.pro/service-api/LiveFeed/Get1x2_VZip?sports=146&champs=1643503&count=40&gr=1521&mode=4&country=192&partner=8&getEmpty=true&virtualSports=true&noFilterBlockEvent=true"
+    "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/gamesByChamp?cfView=3&champId=1643503&country=192&fcountry=192&gr=1521&lng=ru&ref=8"
 )
-
-# 🔥 ИСПРАВЛЕНО: Теперь тот же домен (0018) и совместимый endpoint для получения карт
 STATISTIC_URL_TEMPLATE = os.getenv(
     "STATISTIC_URL_TEMPLATE",
-    "https://melbet-0018.pro/service-api/LiveFeed/GetGameZip?id={game_id}&isSubGames=true&GroupEvents=true&countevents=250&grMode=4&partner=8&topGroups=&country=192&marketType=1&isNewBuilder=true"
+    "https://melbet-8093.pro/cyber-api/mainfeedlive/web/cyber/v3/statistic?country=192&fcountry=192&gameId={game_id}&gr=1521&lng=ru&ref=8"
 )
 
 if not BOT_TOKEN:
