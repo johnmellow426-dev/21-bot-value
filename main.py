@@ -401,7 +401,36 @@ def get_active_games_info(session):
     except Exception as e:
         print(f"❌ Ошибка получения списка игр: {e}")
         return []
+def check_gold_21_pattern(game_id):
+    """
+    Проверяет ID игры на алгоритмический паттерн "Золотого 21" (#G / #O).
+    Возвращает True, если ID аномальный.
+    """
+    str_id = str(game_id)
+    if len(str_id) < 4:
+        return False
 
+    last_4 = str_id[-4:]
+    
+    # 1. Математический триггер (остаток от деления на 13 равен 0)
+    mod_13 = game_id % 13
+    
+    # 2. Наличие повторяющихся цифр в хвосте ID (например, 8854, 8954)
+    has_doubles = len(set(last_4)) <= 3
+    
+    # 3. Сумма последних 4 цифр
+    sum_last_4 = sum(int(d) for d in last_4)
+
+    score = 0
+    if mod_13 == 0:
+        score += 50
+    if has_doubles:
+        score += 25
+    if sum_last_4 in [8, 9, 17, 18, 25, 30]:
+        score += 25
+
+    # Если набрано 75+ баллов — считаем ID аномальным
+    return score >= 75
 
 def main():
     global active_games, game_history, last_assigned_game_num
@@ -420,12 +449,18 @@ def main():
             for g_info in games_info:
                 game_id = g_info["id"]
 
-                # 📌 1. ОБНАРУЖЕНИЕ НОВОЙ ИГРЫ И МГНОВЕННЫЙ АНОНС
+               # 📌 1. ОБНАРУЖЕНИЕ НОВОЙ ИГРЫ И МГНОВЕННЫЙ АНОНС
                 if game_id not in active_games:
                     game_num = extract_game_number(g_info["raw_data"])
                     
+                    # Проверяем ID игры на алгоритмическую аномалию
+                    is_anomalous = check_gold_21_pattern(game_id)
+                    
                     # Формируем текст анонса
                     announcement_text = f"⏳ Ожидание игры #N{game_num}\n (ID: {game_id})"
+                    if is_anomalous:
+                        announcement_text += "\n⚠️ Внимание! Аномальный ID (Высокий шанс Золотого 21 #G)"
+                    
                     msg_id = None
                     
                     # 🚀 Отправляем анонс СРАЗУ в Telegram
@@ -433,7 +468,7 @@ def main():
                         try:
                             sent = bot.send_message(CHANNEL_ID, announcement_text)
                             msg_id = sent.message_id
-                            print(f"📡 Анонсирована будущая игра #N{game_num} (ID: {game_id})")
+                            print(f"📡 Анонсирована будущая игра #N{game_num} (ID: {game_id}) {'[АНОМАЛЬНЫЙ]' if is_anomalous else ''}")
                         except Exception as e:
                             print(f"⚠️ Ошибка отправки анонса #N{game_num}: {e}")
 
