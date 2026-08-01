@@ -17,6 +17,8 @@ VIRTUAL_URL = os.getenv(
     "VIRTUAL_URL",
     "https://melbet-0018.pro/service-api/LiveFeed/Get1x2_VZip?sports=146&champs=1643503&count=40&gr=1521&mode=4&country=192&partner=8&getEmpty=true&virtualSports=true&noFilterBlockEvent=true"
 )
+
+# 🔥 ИСПРАВЛЕНО: Теперь тот же домен (0018) и совместимый endpoint для получения карт
 STATISTIC_URL_TEMPLATE = os.getenv(
     "STATISTIC_URL_TEMPLATE",
     "https://melbet-0018.pro/service-api/LiveFeed/GetGameZip?id={game_id}&isSubGames=true&GroupEvents=true&countevents=250&grMode=4&partner=8&topGroups=&country=192&marketType=1&isNewBuilder=true"
@@ -95,7 +97,6 @@ def extract_game_number(*data_sources):
                         return val
                 except (ValueError, TypeError):
                     pass
-        # Рекурсивный поиск
         for sub_key in ["dopInfo", "game", "main", "info", "statistic", "fullScoreDetail", "CI"]:
             sub_data = data.get(sub_key)
             if isinstance(sub_data, dict):
@@ -109,7 +110,7 @@ def extract_game_number(*data_sources):
     return None
 
 # ============================================================
-#    РАБОТА С КАРТАМИ И АНАЛИТИКА
+#    РАБОТА С КАРТАМИ И АНАЛИТИКА (ПРОГНОЗЫ)
 # ============================================================
 def get_card_symbol(card_value, suit_code):
     val_str = CARD_VALUES.get(card_value, "?")
@@ -166,7 +167,7 @@ def predict_target_recipient(predicted_value, first_card, history):
     else: return "🎩 Дилер (P2)", int((score_p2 / total) * 100)
 
 # ============================================================
-#    ЛОГИКА ПРОГНОЗОВ (без изменений, работает отлично)
+#    ЛОГИКА ПРОГНОЗОВ
 # ============================================================
 def send_new_prediction(trigger_num, symbol, exact_card, recipient, confidence, target_num):
     dogen = current_prediction["dogen_level"]
@@ -285,13 +286,12 @@ def get_active_games_info(session):
     try:
         resp = session.get(VIRTUAL_URL, headers=HEADERS, timeout=10)
         data = resp.json()
-        games = data.get("games") or data.get("Value") or []
+        games = data.get("Value") or [] # Исправлено под формат Get1x2_VZip
         result = []
-        for idx, g in enumerate(games):
+        for g in games:
             result.append({
-                "id": g.get("id") or g.get("I"),
-                "index": idx,
-                "is_finished": g.get("scores", {}).get("currentPeriodName") == "Игра завершена",
+                "id": g.get("I"),
+                "di": g.get("DI"),
                 "raw_data": g
             })
         return result
@@ -301,7 +301,7 @@ def get_active_games_info(session):
 
 def main():
     global active_games, game_history
-    print("🚀 Запуск обновленного бота PRO 21 (Формат #N + ID)...")
+    print("🚀 Запуск бота PRO 21 (Формат #N + ID + ПРОГНОЗЫ)...")
     session = requests.Session()
 
     while True:
@@ -321,12 +321,13 @@ def main():
                     active_games[game_id] = {
                         "message_id": None,
                         "game_id": game_id,
-                        "game_num": None,
+                        "game_num": int(g_info["di"]) if g_info["di"] else None,
                         "last_state": "",
                         "is_finished": False
                     }
 
                 slot = active_games[game_id]
+                display_str = str(slot["game_num"]) if slot["game_num"] else "???"
 
                 stat_url = STATISTIC_URL_TEMPLATE.format(game_id=game_id)
                 try:
@@ -336,17 +337,6 @@ def main():
                 except Exception as e:
                     print(f"⚠️ Ошибка сети при запросе игры #{game_id}: {e}")
                     continue
-
-                # 🔥 НАДЕЖНОЕ ПОЛУЧЕНИЕ НОМЕРА РАУНДА (DI)
-                display_num = g_info["raw_data"].get("DI") or g_info["raw_data"].get("di")
-                if not display_num:
-                    display_num = extract_game_number(stat_data, g_info["raw_data"])
-                
-                if display_num:
-                    slot["game_num"] = int(display_num)
-
-                display_num = slot["game_num"]
-                display_str = str(display_num) if display_num else "???"
 
                 score_detail = stat_data.get("fullScoreDetail", {})
                 p1_score = score_detail.get("scoreOpp1", 0)
@@ -360,12 +350,12 @@ def main():
 
                 is_finished = (status == "Игра завершена")
 
-                # Фиксация результатов завершенной игры
-                if is_finished and display_num and display_num not in game_history:
+                # Фиксация результатов завершенной игры и запуск прогнозов
+                if is_finished and slot["game_num"] and slot["game_num"] not in game_history:
                     first_card_value = p1_values[0] if p1_values else None
                     first_card_suit = p1_full[0][1] if p1_full else None
 
-                    game_history[display_num] = {
+                    game_history[slot["game_num"]] = {
                         "player_first_card": first_card_value,
                         "player_values": p1_values,
                         "dealer_values": p2_values,
@@ -377,31 +367,25 @@ def main():
                         oldest = min(game_history.keys())
                         del game_history[oldest]
 
-                    print(f"📝 Игра #N{display_num} (ID: {game_id}) завершена")
-                    process_prediction_check(display_num, p1_values, p2_values, p1_full, p2_full)
+                    print(f"📝 Игра #N{slot['game_num']} (ID: {game_id}) завершена. Проверка прогнозов...")
+                    process_prediction_check(slot["game_num"], p1_values, p2_values, p1_full, p2_full)
                     
                     if not current_prediction.get("is_active"):
-                        process_new_prediction(display_num, first_card_value, first_card_suit)
+                        process_new_prediction(slot["game_num"], first_card_value, first_card_suit)
 
-                # 🔥 ФОРМИРОВАНИЕ СООБЩЕНИЯ В НОВОМ ФОРМАТЕ
-                current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}_{display_num}"
+                # Формирование сообщения
+                current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}_{slot['game_num']}"
 
                 if current_state != slot["last_state"] and (p1_cards or p2_cards):
                     cards_p1 = " ".join(p1_cards) if p1_cards else "?"
                     cards_p2 = " ".join(p2_cards) if p2_cards else "?"
 
-                    # 1. ЗАГОЛОВОК ПО ТВОЕМУ ЗАПРОСУ
+                    # 🔥 ЗАГОЛОВОК ПО ТВОЕМУ ЗАПРОСУ
                     header_line = f"🎮 ИГРА #N{display_str}.     ID: {game_id}"
 
-                    # 2. СТРОКА СО СЧЕТОМ
+                    # 🔥 СТРОКА СО СЧЕТОМ
                     if not is_finished:
-                        # Стрелка указывает на того, кто выигрывает в данный момент
-                        if p1_score > p2_score:
-                            arrow = "◀️"
-                        elif p2_score > p1_score:
-                            arrow = "▶️"
-                        else:
-                            arrow = "⚖️"
+                        arrow = "▶️" if p1_score > p2_score else ("◀️" if p2_score > p1_score else "⚖️")
                         stat_line = f"#N{display_str}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}"
                     else:
                         p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
