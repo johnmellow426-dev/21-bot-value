@@ -93,32 +93,52 @@ def normalize_game_num(num):
 
 def extract_game_number(game_data):
     """
-    Извлекает номер игры строго из поля TN ("раунд") или DI из API.
+    Извлекает номер раунда (TN/DI) с учетом формата 1x/Melbet LiveFeed (Get1x2_VZip)
     """
-    # 1. Проверяем поле TN на верхнем уровне
-    tn_val = game_data.get("TN") or game_data.get("tn")
-    
-    # 2. Если на верхнем уровне нет, проверяем внутри вложенных словарей (например, scores)
-    if not tn_val and isinstance(game_data.get("scores"), dict):
-        scores = game_data["scores"]
-        tn_val = scores.get("TN") or scores.get("tn") or scores.get("DI") or scores.get("di")
-        
-    # 3. Если поле TN не найдено, проверяем DI
-    if not tn_val:
-        tn_val = game_data.get("DI") or game_data.get("di")
+    tn_val = None
 
+    # 1. Поиск на верхнем уровне (TN / DI)
+    tn_val = game_data.get("TN") or game_data.get("DI")
+
+    # 2. Поиск внутри объекта счета SC (Score)
+    if not tn_val and "SC" in game_data and isinstance(game_data["SC"], dict):
+        sc = game_data["SC"]
+        # В VZip раунд часто лежит в SC.CP (Current Period) или SC.CPS
+        tn_val = sc.get("TN") or sc.get("DI") or sc.get("CP")
+        
+        # Если есть текстовое имя периода, например "Раунд 575" или "575 раунд"
+        if not tn_val and "CPN" in sc:
+            cpn_text = str(sc["CPN"])
+            # Извлекаем все цифры из названия периода
+            digits = "".join(filter(str.isdigit, cpn_text))
+            if digits:
+                tn_val = digits
+
+    # 3. Поиск во вложенном объекте scores (если используете прослойку)
+    if not tn_val and "scores" in game_data and isinstance(game_data["scores"], dict):
+        scores = game_data["scores"]
+        tn_val = scores.get("TN") or scores.get("DI") or scores.get("CP")
+
+    # 4. Поиск в массиве дополнительных свойств MISC / MIS
+    if not tn_val and "MIS" in game_data and isinstance(game_data["MIS"], list):
+        for item in game_data["MIS"]:
+            if isinstance(item, dict) and item.get("K") == "TN":
+                tn_val = item.get("V")
+                break
+
+    # Приводим к числу, если нашли
     if tn_val is not None:
         try:
             parsed_num = int(tn_val)
             norm_num = normalize_game_num(parsed_num)
-            print(f"🔢 Номер раунда из API (TN/DI: {tn_val}) -> #{norm_num}")
+            print(f"🔢 Номер раунда из API: #{norm_num} (сырое значение: {tn_val})")
             return norm_num
-        except ValueError:
+        except (ValueError, TypeError):
             print(f"⚠️ Не удалось привести TN ({tn_val}) к числу")
 
-    print(f"⚠️ Поле 'TN' не найдено в данных игры ID: {game_data.get('id')}")
+    game_id = game_data.get("I") or game_data.get("id")
+    print(f"⚠️ Поле 'TN/DI' не найдено в JSON игры ID: {game_id}")
     return 0
-
 
 # ============================================================
 #   КАРТЫ И ЛОГИКА
@@ -374,20 +394,28 @@ def get_active_games_info(session):
         resp = session.get(VIRTUAL_URL, headers=HEADERS, timeout=10)
         data = resp.json()
         
-        # Разбор ответа (подходит для формата 'Value' и прямого списка 'games')
-        games = data.get("Value", []) or data.get("games", [])
-        if isinstance(games, dict):
-            games = [games]
-            
+        # В VZip массивы игр лежат в ключе "Value"
+        raw_games = data.get("Value", []) or data.get("games", [])
+        if isinstance(raw_games, dict):
+            raw_games = [raw_games]
+
         result = []
-        for idx, g in enumerate(games):
-            scores = g.get("scores", {}) or g.get("SC", {})
+        for idx, g in enumerate(raw_games):
+            # В Get1x2_VZip ключ ID — это 'I'
+            game_id = g.get("I") or g.get("id")
+            if not game_id:
+                continue
+
+            sc = g.get("SC", {}) or g.get("scores", {})
+            is_finished = (sc.get("CPS") == "Игра завершена") or (sc.get("currentPeriodName") == "Игра завершена")
+
             result.append({
-                "id": g.get("id") or g.get("I"),
+                "id": game_id,
                 "index": idx,
-                "is_finished": scores.get("currentPeriodName") == "Игра завершена" or scores.get("CPS") == "Игра завершена",
+                "is_finished": is_finished,
                 "raw_data": g
             })
+            
         return result
     except Exception as e:
         print(f"❌ Ошибка получения списка игр: {e}")
