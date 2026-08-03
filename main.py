@@ -33,7 +33,7 @@ HEADERS = {
 }
 
 # --- КОНСТАНТЫ ---
-HIGH_CARD_VALUES = { 11, 12, 13,14}
+HIGH_CARD_VALUES = {11, 12, 13, 14}
 
 SUITS = {
     0: "♠️",
@@ -93,51 +93,26 @@ def normalize_game_num(num):
 
 def extract_game_number(game_data):
     """
-    Извлекает номер раунда (TN/DI) с учетом формата 1x/Melbet LiveFeed (Get1x2_VZip)
+    Извлекает номер раунда из JSON.
+    В API 1x/Melbet:
+    - DI содержит номер раунда (например, "574")
+    - TN содержит подпись ("раунд")
     """
-    tn_val = None
+    tn_val = game_data.get("DI") or game_data.get("TN")
 
-    # 1. Поиск на верхнем уровне (TN / DI)
-    tn_val = game_data.get("TN") or game_data.get("DI")
+    if not tn_val or not str(tn_val).isdigit():
+        sc = game_data.get("SC", {})
+        tn_val = sc.get("DI") or sc.get("CP")
 
-    # 2. Поиск внутри объекта счета SC (Score)
-    if not tn_val and "SC" in game_data and isinstance(game_data["SC"], dict):
-        sc = game_data["SC"]
-        # В VZip раунд часто лежит в SC.CP (Current Period) или SC.CPS
-        tn_val = sc.get("TN") or sc.get("DI") or sc.get("CP")
-        
-        # Если есть текстовое имя периода, например "Раунд 575" или "575 раунд"
-        if not tn_val and "CPN" in sc:
-            cpn_text = str(sc["CPN"])
-            # Извлекаем все цифры из названия периода
-            digits = "".join(filter(str.isdigit, cpn_text))
-            if digits:
-                tn_val = digits
-
-    # 3. Поиск во вложенном объекте scores (если используете прослойку)
-    if not tn_val and "scores" in game_data and isinstance(game_data["scores"], dict):
-        scores = game_data["scores"]
-        tn_val = scores.get("TN") or scores.get("DI") or scores.get("CP")
-
-    # 4. Поиск в массиве дополнительных свойств MISC / MIS
-    if not tn_val and "MIS" in game_data and isinstance(game_data["MIS"], list):
-        for item in game_data["MIS"]:
-            if isinstance(item, dict) and item.get("K") == "TN":
-                tn_val = item.get("V")
-                break
-
-    # Приводим к числу, если нашли
     if tn_val is not None:
         try:
             parsed_num = int(tn_val)
-            norm_num = normalize_game_num(parsed_num)
-            print(f"🔢 Номер раунда из API: #{norm_num} (сырое значение: {tn_val})")
-            return norm_num
+            return parsed_num
         except (ValueError, TypeError):
-            print(f"⚠️ Не удалось привести TN ({tn_val}) к числу")
+            pass
 
     game_id = game_data.get("I") or game_data.get("id")
-    print(f"⚠️ Поле 'TN/DI' не найдено в JSON игры ID: {game_id}")
+    print(f"⚠️ Поле 'DI' (номер раунда) не найдено или не число в JSON игры ID: {game_id}")
     return 0
 
 # ============================================================
@@ -151,7 +126,11 @@ def get_card_symbol(card_value, suit_code):
 
 def parse_cards_detail(cards_str):
     try:
-        cards = json.loads(cards_str)
+        if isinstance(cards_str, list):
+            cards = cards_str
+        else:
+            cards = json.loads(cards_str)
+            
         symbols, values, full_cards = [], [], []
         for c in cards:
             cv, cs = c.get("CV", 0), c.get("CS", 0)
@@ -394,14 +373,12 @@ def get_active_games_info(session):
         resp = session.get(VIRTUAL_URL, headers=HEADERS, timeout=10)
         data = resp.json()
         
-        # В VZip массивы игр лежат в ключе "Value"
         raw_games = data.get("Value", []) or data.get("games", [])
         if isinstance(raw_games, dict):
             raw_games = [raw_games]
 
         result = []
         for idx, g in enumerate(raw_games):
-            # В Get1x2_VZip ключ ID — это 'I'
             game_id = g.get("I") or g.get("id")
             if not game_id:
                 continue
@@ -467,7 +444,6 @@ def main():
 
                 # 📌 1. ОБНАРУЖЕНИЕ НОВОЙ ИГРЫ И МГНОВЕННЫЙ АНОНС
                 if game_id not in active_games:
-                    # Номер игры извлекается ТОЛЬКО из поля TN / DI
                     game_num = extract_game_number(g_info["raw_data"])
                     
                     is_anomalous = check_gold_21_pattern(game_id)
@@ -573,10 +549,10 @@ def main():
                         msg = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points}{tags_str}\n (ID: {game_id})"
 
                     try:
-                        if slot["message_id"] is None:
+                        if slot["message_id"] is None and CHANNEL_ID:
                             sent = bot.send_message(CHANNEL_ID, msg)
                             slot["message_id"] = sent.message_id
-                        else:
+                        elif CHANNEL_ID and slot["message_id"]:
                             bot.edit_message_text(chat_id=CHANNEL_ID, message_id=slot["message_id"], text=msg)
                     except Exception as e:
                         print(f"⚠️ Ошибка обновления сообщения в Telegram: {e}")
