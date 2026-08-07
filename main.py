@@ -13,7 +13,7 @@ PREDICTION_CHANNEL_ID = os.getenv("PREDICTION_CHANNEL_ID")
 PREDICTION_DETAILED_CHANNEL_ID = os.getenv("PREDICTION_DETAILED_CHANNEL_ID")
 
 # Обновлено до актуального зеркала
-BASE_DOMAIN = os.getenv("BASE_DOMAIN", "melbet-0018.pro")
+BASE_DOMAIN = os.getenv("BASE_DOMAIN", "melbet-4866.pro")
 
 VIRTUAL_URL = os.getenv(
     "VIRTUAL_URL",
