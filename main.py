@@ -445,15 +445,17 @@ def main():
                 # 📌 1. ОБНАРУЖЕНИЕ НОВОЙ ИГРЫ И МГНОВЕННЫЙ АНОНС
                 if game_id not in active_games:
                     game_num = extract_game_number(g_info["raw_data"])
-                    
                     is_anomalous = check_gold_21_pattern(game_id)
                     
-                    announcement_text = f"⏳ Ожидание игры #N{game_num}\n (ID: {game_id})"
+                    warning_text = ""
                     if is_anomalous:
-                        announcement_text += "\n⚠️ Внимание! Аномальный ID (Высокий шанс Золотого 21 #G)"
+                        warning_text = "⚠️ Внимание! (#R #X #G)"
+                    
+                    announcement_text = f"⏳ Ожидание игры #N{game_num}\n (ID: {game_id})"
+                    if warning_text:
+                        announcement_text = f"{warning_text}\n{announcement_text}"
                     
                     msg_id = None
-                    
                     if CHANNEL_ID:
                         try:
                             sent = bot.send_message(CHANNEL_ID, announcement_text)
@@ -465,6 +467,7 @@ def main():
                     active_games[game_id] = {
                         "message_id": msg_id,
                         "game_num": game_num,
+                        "warning_header": warning_text,
                         "last_state": announcement_text,
                         "is_finished": False
                     }
@@ -525,12 +528,12 @@ def main():
                     if not is_finished:
                         arrow = "◀️" if p1_score < 17 else ("▶️" if p2_score < 17 else "")
                         if arrow:
-                            msg = f"#N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}\n (ID: {game_id})"
+                            game_info = f"#N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}\n (ID: {game_id})"
                         else:
-                            msg = f"#N{game_num}. {p1_score}({cards_p1}) {p2_score}({cards_p2}) #T{total_points}\n (ID: {game_id})"
+                            game_info = f"#N{game_num}. {p1_score}({cards_p1}) {p2_score}({cards_p2}) #T{total_points}\n (ID: {game_id})"
                     else:
                         p1_win = (p1_score <= 21 and p1_score > p2_score) or (p2_score > 21 and p1_score <= 21)
-                        p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p1_score <= 21)
+                        p2_win = (p2_score <= 21 and p2_score > p1_score) or (p1_score > 21 and p2_score <= 21)
                         draw = (p1_score == p2_score) or (p1_score > 21 and p2_score > 21)
 
                         res_p1 = "✅" if p1_win else ("🔰" if draw else "")
@@ -546,7 +549,13 @@ def main():
                             tags.append(TAG_R)
 
                         tags_str = f" {' '.join(tags)}" if tags else ""
-                        msg = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points}{tags_str}\n (ID: {game_id})"
+                        game_info = f"#N{game_num}. {res_p1}{p1_score}({cards_p1}) - {res_p2}{p2_score}({cards_p2}) #T{total_points}{tags_str}\n (ID: {game_id})"
+
+                    warning = slot.get("warning_header")
+                    if warning:
+                        msg = f"{warning}\n{game_info}"
+                    else:
+                        msg = game_info
 
                     try:
                         if slot["message_id"] is None and CHANNEL_ID:
