@@ -45,7 +45,7 @@ SUITS = {
 }
 
 CARD_VALUES = {
-    1: "A", 14: "A",
+    14: "A",
     2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10",
     11: "J", 12: "Q", 13: "K"
 }
@@ -80,8 +80,8 @@ bj_prediction = {
     "trigger_game_num": None,
     "target_game_num": None,
     "is_active": False,
-    "dogen_level": 1,
-    "max_dogen": 4 # Защита от слива банка
+    "dogen_level": 2,
+    "max_dogen": 2 # Защита от слива банка
 }
 
 
@@ -386,7 +386,7 @@ def check_bj_trigger(history):
     Логика: Если в последних 4 завершенных играх НЕ было комбинации #O🔵 #R🟢,
     делаем прогноз на следующую игру.
     """
-    TRIGGER_GAMES_COUNT = 1 # 🛠️ Настройка чувствительности
+    TRIGGER_GAMES_COUNT = 3 # 🛠️ Настройка чувствительности
     
     if len(history) < TRIGGER_GAMES_COUNT:
         return False
