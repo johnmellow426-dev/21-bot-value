@@ -11,6 +11,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 PREDICTION_CHANNEL_ID = os.getenv("PREDICTION_CHANNEL_ID")
 PREDICTION_DETAILED_CHANNEL_ID = os.getenv("PREDICTION_DETAILED_CHANNEL_ID")
+# 🆕 Отдельный канал для прогноза Блэкджека (#O🔵 #R🟢)
+BJ_PREDICTION_CHANNEL_ID = os.getenv("BJ_PREDICTION_CHANNEL_ID")
 
 # Обновлено до актуального зеркала
 BASE_DOMAIN = os.getenv("BASE_DOMAIN", "melbet-4866.pro")
@@ -70,6 +72,16 @@ current_prediction = {
     "target_game_num": None,
     "dogen_level": 1,
     "is_active": False
+}
+
+# 🆕 --- ХРАНИЛИЩЕ ДЛЯ ПРОГНОЗА БЛЭКДЖЕКА (#O🔵 #R🟢) ---
+bj_prediction = {
+    "message_id": None,
+    "trigger_game_num": None,
+    "target_game_num": None,
+    "is_active": False,
+    "dogen_level": 1,
+    "max_dogen": 4 # Защита от слива банка
 }
 
 
@@ -365,6 +377,100 @@ def process_new_prediction(game_num, first_card_value, first_card_suit):
 
 
 # ============================================================
+#   ПРОГНОЗ БЛЭКДЖЕКА (#O🔵 #R🟢)
+# ============================================================
+
+def check_bj_trigger(history):
+    """
+    Триггер для прогноза #O🔵 #R🟢.
+    Логика: Если в последних 4 завершенных играх НЕ было комбинации #O🔵 #R🟢,
+    делаем прогноз на следующую игру.
+    """
+    TRIGGER_GAMES_COUNT = 1 # 🛠️ Настройка чувствительности
+    
+    if len(history) < TRIGGER_GAMES_COUNT:
+        return False
+        
+    recent_games = list(history.values())[-TRIGGER_GAMES_COUNT:]
+    has_bj = any(g.get("is_o_r", False) for g in recent_games)
+    
+    return not has_bj
+
+def send_bj_prediction(trigger_num, target_num, dogen):
+    if not BJ_PREDICTION_CHANNEL_ID:
+        return
+        
+    msg = f"⚠️ ПРОГНОЗ: #O🔵 #R🟢\n🎯 Игра №{target_num}\n💰 Догон: {dogen}\n⏳ Результат:"
+    try:
+        sent = bot.send_message(BJ_PREDICTION_CHANNEL_ID, msg)
+        bj_prediction["message_id"] = sent.message_id
+        bj_prediction["trigger_game_num"] = trigger_num
+        bj_prediction["target_game_num"] = target_num
+        bj_prediction["is_active"] = True
+        print(f"🎯 Отправлен прогноз Блэкджека на №{target_num}")
+    except Exception as e:
+        print(f"❌ Ошибка отправки прогноза Блэкджека: {e}")
+
+def finalize_bj_prediction(status_code):
+    if not bj_prediction.get("is_active"):
+        return
+        
+    target_num = bj_prediction["target_game_num"]
+    dogen = bj_prediction["dogen_level"]
+    
+    if status_code >= 0:
+        res_str = "✅ ПРОШЕЛ"
+        if status_code > 0:
+            res_str += f" (+{status_code})"
+    else:
+        res_str = "❌ МИМО"
+        
+    msg = f"⚠️ ПРОГНОЗ: #O🔵 #R🟢\n🎯 Игра №{target_num}\n💰 Догон: {dogen}\n🏁 Результат: {res_str}"
+    
+    if bj_prediction.get("message_id") and BJ_PREDICTION_CHANNEL_ID:
+        try:
+            bot.edit_message_text(
+                chat_id=BJ_PREDICTION_CHANNEL_ID,
+                message_id=bj_prediction["message_id"],
+                text=msg
+            )
+            print(f"📌 Прогноз Блэкджека №{target_num} рассчитан: {res_str}")
+        except Exception as e:
+            print(f"❌ Ошибка обновления прогноза Блэкджека: {e}")
+            
+    if status_code >= 0:
+        bj_prediction["dogen_level"] = 1
+    else:
+        if bj_prediction["dogen_level"] < bj_prediction["max_dogen"]:
+            bj_prediction["dogen_level"] += 1
+        else:
+            bj_prediction["dogen_level"] = 1 # Сброс догона после достижения максимума
+            
+    bj_prediction["is_active"] = False
+    bj_prediction["message_id"] = None
+
+def process_bj_prediction_check(game_num, is_o_r):
+    if not bj_prediction.get("is_active"):
+        return
+        
+    target_num = bj_prediction["target_game_num"]
+    plus_1_num = normalize_game_num(target_num + 1)
+    plus_2_num = normalize_game_num(target_num + 2)
+    
+    if game_num == target_num:
+        if is_o_r:
+            finalize_bj_prediction(0)
+    elif game_num == plus_1_num:
+        if is_o_r:
+            finalize_bj_prediction(1)
+    elif game_num == plus_2_num:
+        if is_o_r:
+            finalize_bj_prediction(2)
+        else:
+            finalize_bj_prediction(-1)
+
+
+# ============================================================
 #   СБОР ДАННЫХ И ОСНОВНОЙ ЦИКЛ
 # ============================================================
 
@@ -499,24 +605,39 @@ def main():
                     first_card_value = p1_values[0] if p1_values else None
                     first_card_suit = p1_full[0][1] if p1_full else None
 
+                    # 🆕 Вычисляем признак #O🔵 #R🟢 (Блэкджек / 2 карты)
+                    is_o = (p1_score == 21 or p2_score == 21)
+                    is_r = (len(p1_cards) == 2 and len(p2_cards) == 2)
+                    is_target_bj = is_o and is_r
+
                     game_history[game_num] = {
                         "player_first_card": first_card_value,
                         "player_values": p1_values,
                         "dealer_values": p2_values,
                         "player_full_cards": p1_full,
-                        "dealer_full_cards": p2_full
+                        "dealer_full_cards": p2_full,
+                        "is_o_r": is_target_bj # Сохраняем факт Блэкджека для истории
                     }
 
                     if len(game_history) > 50:
                         oldest = min(game_history.keys())
                         del game_history[oldest]
 
-                    print(f"📝 Игра #{game_num} завершена | Триггер: {first_card_value} масть {first_card_suit}")
+                    print(f"📝 Игра #{game_num} завершена | Триггер: {first_card_value} масть {first_card_suit} | #O#R: {is_target_bj}")
 
+                    # Проверка основных прогнозов
                     process_prediction_check(game_num, p1_values, p2_values, p1_full, p2_full)
+                    
+                    # 🆕 Проверка прогноза Блэкджека
+                    process_bj_prediction_check(game_num, is_target_bj)
                     
                     if not current_prediction.get("is_active"):
                         process_new_prediction(game_num, first_card_value, first_card_suit)
+                        
+                    # 🆕 Генерация нового прогноза Блэкджека, если нет активного и сработал триггер
+                    if not bj_prediction.get("is_active") and check_bj_trigger(game_history):
+                        target_bj_num = normalize_game_num(game_num + 1)
+                        send_bj_prediction(game_num, target_bj_num, bj_prediction["dogen_level"])
 
                 # 📌 4. ОБНОВЛЕНИЕ СООБЩЕНИЯ
                 current_state = f"{p1_score}_{p2_score}_{'_'.join(p1_cards)}_{'_'.join(p2_cards)}_{is_finished}"
@@ -526,7 +647,7 @@ def main():
                     cards_p2 = " ".join(p2_cards) if p2_cards else "?"
 
                     if not is_finished:
-                        arrow = "◀️" if p1_score < 17 else ("▶️" if p2_score < 17 else "")
+                        arrow = "◀️" if p1_score < 19 else ("▶️" if p2_score < 16 else "")
                         if arrow:
                             game_info = f"#N{game_num}. {p1_score}({cards_p1}) {arrow} {p2_score}({cards_p2}) #T{total_points}\n (ID: {game_id})"
                         else:
